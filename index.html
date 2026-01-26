@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js 3rd Person Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            pointer-events: none;
+            user-select: none;
+        }
+        #blocker {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-family: sans-serif;
+            font-size: 24px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        WASD = Liiku <br>
+        SPACE = Hyppää <br>
+        HIIRI = Käänny <br>
+        LMB = Potkaise (Kick)
+    </div>
+    
+    <div id="blocker">Klikkaa tästä pelataksesi</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "simplex-noise": "https://unpkg.com/simplex-noise@4.0.1/dist/esm/simplex-noise.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { createNoise2D } from 'simplex-noise';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // --- ASETUKSET ---
+        const CHUNK_SIZE = 50;
+        const DRAW_DISTANCE = 2;
+        const MOVEMENT_SPEED = 10;
+        const JUMP_FORCE = 15;
+        const GRAVITY = 30;
+
+        // --- ALUSTUS ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 20, CHUNK_SIZE * (DRAW_DISTANCE - 0.5));
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        // Kamera on nyt "silmien korkeudella" suhteessa kontrolliobjektiin, siirrämme sitä myöhemmin taakse
+        camera.position.set(0, 2, -5); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Valot
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+        scene.add(hemiLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(50, 100, 50);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // --- KONTROLLIT JA KAMERA (PointerLock) ---
+        // Teemme näkymättömän "pivot"-objektin, jota kamera seuraa. Hahmo seuraa tätä objektia.
+        const playerPivot = new THREE.Object3D();
+        playerPivot.position.y = 10; // Aloituskorkeus
+        scene.add(playerPivot);
+
+        const controls = new PointerLockControls(camera, document.body);
+
+        const blocker = document.getElementById('blocker');
+        blocker.addEventListener('click', () => {
+            controls.lock();
+        });
+
+        controls.addEventListener('lock', () => {
+            blocker.style.display = 'none';
+        });
+
+        controls.addEventListener('unlock', () => {
+            blocker.style.display = 'flex';
+        });
+
+        // --- HAHMON LATAUS JA ANIMAATIOT ---
+        let playerModel = null;
+        let mixer = null;
+        let animationsMap = {};
+        let currentAction = 'idle';
+
+        // Placeholder-laatikko kunnes malli latautuu
+        const placeholderGeo = new THREE.BoxGeometry(1, 2, 1);
+        const placeholderMat = new THREE.MeshStandardMaterial({ color: 0xff0000, wireframe: true });
+        let playerMesh = new THREE.Mesh(placeholderGeo, placeholderMat);
+        playerPivot.add(playerMesh); // Pelaaja-mesh on pivotin lapsi
+
+        const loader = new GLTFLoader();
+        loader.load('./chars/testchard.glb', (gltf) => {
+            console.log("Hahmo ladattu", gltf);
+            const model = gltf.scene;
+            model.traverse((child) => {
+                if (child.isMesh) child.castShadow = true;
+            });
+            
+            // Skaalaa mallia jos se on liian iso/pieni (säädä tarvittaessa)
+            // model.scale.set(1, 1, 1); 
+            // Mallin kääntö jos se katsoo väärään suuntaan (usein Blender-mallit katsovat +Y)
+            model.rotation.y = Math.PI; // Käännetään selkä kameraan päin
+
+            // Poistetaan placeholder ja lisätään oikea malli
+            playerPivot.remove(playerMesh);
+            playerMesh = model;
+            // Asetetaan malli pivotin "jalkoihin"
+            playerMesh.position.y = -1; 
+            playerPivot.add(playerMesh);
+
+            // Animaatiot
+            mixer = new THREE.AnimationMixer(model);
+            gltf.animations.forEach((clip) => {
+                // Tallennetaan animaatiot nimen perusteella (pienellä kirjoitettuna varmuuden vuoksi)
+                animationsMap[clip.name.toLowerCase()] = mixer.clipAction(clip);
+            });
+
+            // Käynnistetään idle
+            fadeToAction('idle', 0.2);
+
+        }, undefined, (error) => {
+            console.error('Virhe hahmon latauksessa:', error);
+        });
+
+        function fadeToAction(name, duration) {
+            const previousAction = animationsMap[currentAction];
+            const activeAction = animationsMap[name];
+
+            if (previousAction !== activeAction && activeAction) {
+                if (previousAction) previousAction.fadeOut(duration);
+                activeAction.reset().fadeIn(duration).play();
+                currentAction = name;
+            }
+        }
+
+        // Hyökkäyslogiikka
+        let isAttacking = false;
+        
+        window.addEventListener('mousedown', (e) => {
+            if (controls.isLocked && e.button === 0 && !isAttacking && mixer) {
+                performAttack();
+            }
+        });
+
+        function performAttack() {
+            if (!animationsMap['kick']) return;
+            
+            isAttacking = true;
+            // Toistetaan potku vain kerran
+            const action = animationsMap['kick'];
+            action.setLoop(THREE.LoopOnce);
+            action.clampWhenFinished = true;
+            
+            fadeToAction('kick', 0.1);
+
+            mixer.addEventListener('finished', onAttackFinished);
+        }
+
+        function onAttackFinished(e) {
+            // Kun potku on valmis, palaa idle/run tilaan
+            if (e.action === animationsMap['kick']) {
+                isAttacking = false;
+                mixer.removeEventListener('finished', onAttackFinished);
+                // Palaa oikeaan tilaan riippuen liikkuuko hahmo
+                const isMoving = keys.w || keys.s || keys.a || keys.d;
+                fadeToAction(isMoving ? 'run' : 'idle', 0.2);
+            }
+        }
+
+
+        // --- MAAILMAN GENERINTI (Sama kuin aiemmin) ---
+        const noise2D = createNoise2D();
+        const chunks = new Map();
+
+        function getTerrainHeight(x, z) {
+            let y = noise2D(x * 0.01, z * 0.01) * 10; 
+            y += noise2D(x * 0.05, z * 0.05) * 2;
+            if (y < -2) y = -2; 
+            return y;
+        }
+
+        function createObject(x, y, z, type) {
+            const group = new THREE.Group();
+            group.position.set(x, y, z);
+            if (type === 'tree') {
+                const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2, 0.5), new THREE.MeshStandardMaterial({color: 0x8B4513}));
+                trunk.position.y = 1; trunk.castShadow = true;
+                const leaves = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshStandardMaterial({color: 0x228B22}));
+                leaves.position.y = 2.5; leaves.castShadow = true;
+                group.add(trunk, leaves);
+            } else {
+                const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.5), new THREE.MeshStandardMaterial({color: 0x808080}));
+                rock.position.y = 0.3; rock.castShadow = true;
+                group.add(rock);
+            }
+            return group;
+        }
+
+        function createChunk(chunkX, chunkZ) {
+            const group = new THREE.Group();
+            const geometry = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, 10, 10);
+            geometry.rotateX(-Math.PI / 2);
+            const positions = geometry.attributes.position;
+            const v = new THREE.Vector3();
+            for (let i = 0; i < positions.count; i++) {
+                v.fromBufferAttribute(positions, i);
+                positions.setY(i, getTerrainHeight(v.x + chunkX*CHUNK_SIZE, v.z + chunkZ*CHUNK_SIZE));
+            }
+            geometry.computeVertexNormals();
+            const ground = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x3cb371, flatShading: true }));
+            ground.receiveShadow = true;
+            group.add(ground);
+            
+            // Vesi
+            const water = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE).rotateX(-Math.PI/2), new THREE.MeshStandardMaterial({color: 0x1E90FF, transparent: true, opacity: 0.8}));
+            water.position.y = -1.8;
+            group.add(water);
+
+            // Objektit
+            for(let i=0; i<5; i++) {
+                const rX = (Math.random()-0.5)*CHUNK_SIZE;
+                const rZ = (Math.random()-0.5)*CHUNK_SIZE;
+                const wX = rX + chunkX*CHUNK_SIZE; 
+                const wZ = rZ + chunkZ*CHUNK_SIZE;
+                const h = getTerrainHeight(wX, wZ);
+                if(h > -1.5) {
+                    const obj = createObject(rX, h, rZ, Math.random()>0.3?'tree':'rock');
+                    group.add(obj);
+                }
+            }
+            group.position.set(chunkX * CHUNK_SIZE, 0, chunkZ * CHUNK_SIZE);
+            scene.add(group);
+            return group;
+        }
+
+        // --- LIIKKUMINEN ---
+        const playerVelocity = new THREE.Vector3();
+        let isGrounded = false;
+        const keys = { w: false, a: false, s: false, d: false, space: false };
+
+        window.addEventListener('keydown', (e) => {
+            switch(e.code) {
+                case 'KeyW': keys.w = true; break;
+                case 'KeyA': keys.a = true; break;
+                case 'KeyS': keys.s = true; break;
+                case 'KeyD': keys.d = true; break;
+                case 'Space': keys.space = true; break;
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            switch(e.code) {
+                case 'KeyW': keys.w = false; break;
+                case 'KeyA': keys.a = false; break;
+                case 'KeyS': keys.s = false; break;
+                case 'KeyD': keys.d = false; break;
+                case 'Space': keys.space = false; break;
+            }
+        });
+
+        const clock = new THREE.Clock();
+
+        function updateChunks() {
+            const pX = Math.round(playerPivot.position.x / CHUNK_SIZE);
+            const pZ = Math.round(playerPivot.position.z / CHUNK_SIZE);
+            const active = new Set();
+            for(let x=-DRAW_DISTANCE; x<=DRAW_DISTANCE; x++){
+                for(let z=-DRAW_DISTANCE; z<=DRAW_DISTANCE; z++){
+                    const k = `${pX+x},${pZ+z}`;
+                    active.add(k);
+                    if(!chunks.has(k)) chunks.set(k, createChunk(pX+x, pZ+z));
+                }
+            }
+            for(const [k, obj] of chunks) {
+                if(!active.has(k)) {
+                    scene.remove(obj);
+                    chunks.delete(k);
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = Math.min(clock.getDelta(), 0.1);
+
+            if (controls.isLocked) {
+                // --- 1. LIIKE LOGIIKKA (Third Person) ---
+                // PointerLockControls kääntää kameraa. Haluamme liikkua kameran suuntaan.
+                
+                // Saadaan kameran suunta
+                const directionVector = new THREE.Vector3();
+                const frontVector = new THREE.Vector3(0, 0, 0);
+                const sideVector = new THREE.Vector3(0, 0, 0);
+                
+                // Eteen/taakse (W/S)
+                if (keys.w) frontVector.z = 1; // Controls.getDirection antaa negatiivisen Z:n eteenpäin, joten käännetään logiikkaa tarvittaessa
+                if (keys.s) frontVector.z = -1;
+                
+                // Sivulle (A/D)
+                if (keys.a) sideVector.x = -1;
+                if (keys.d) sideVector.x = 1;
+
+                // Lasketaan lopullinen liikesuunta kameran suunnan perusteella
+                directionVector.add(frontVector);
+                directionVector.add(sideVector);
+                directionVector.normalize();
+
+                // Muunnetaan suunta vastaamaan kameran kääntymistä (y-akselin ympäri)
+                // PointerLockControls kääntää kameraa, mutta ei pivot-objektia automaattisesti.
+                // Mutta me haluamme että W liikkuu sinne minne kamera katsoo.
+                
+                if (keys.w || keys.s || keys.a || keys.d) {
+                    const camY = camera.rotation.y; // Kameran Y-rotaatio
+                    // Käännä liikevektoria kameran suuntaan (vain Y-akseli)
+                    // Mutta koska PointerLockControls pyörittää kameraa itseään, meidän täytyy ottaa suunta siitä
+                    
+                    controls.getDirection(directionVector); 
+                    // getDirection antaa suunnan eteenpäin (vektori on 0,0,-1 kameran lokaalissa).
+                    // Meidän pitää laskea yhdistetty vektori WASD:sta.
+                    
+                    // Helpompi tapa: Käytetään kameran right/forward vektoreita
+                    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    forward.y = 0; // Ei lennetä taivaalle
+                    forward.normalize();
+                    
+                    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                    right.y = 0;
+                    right.normalize();
+
+                    const moveDir = new THREE.Vector3();
+                    if (keys.w) moveDir.add(forward);
+                    if (keys.s) moveDir.sub(forward);
+                    if (keys.d) moveDir.add(right);
+                    if (keys.a) moveDir.sub(right);
+
+                    if (moveDir.length() > 0) {
+                        moveDir.normalize();
+                        playerVelocity.x = moveDir.x * MOVEMENT_SPEED;
+                        playerVelocity.z = moveDir.z * MOVEMENT_SPEED;
+                        
+                        // Käännä hahmo (mesh) katsomaan liikesuuntaan
+                        // Lisätään Math.PI koska malli oli alunperin käännetty selkä kameraan
+                        const angle = Math.atan2(moveDir.x, moveDir.z);
+                        playerPivot.rotation.y = angle + Math.PI; 
+                    }
+                } else {
+                    playerVelocity.x *= 0.8;
+                    playerVelocity.z *= 0.8;
+                }
+
+                // Hyppy
+                if (keys.space && isGrounded) {
+                    playerVelocity.y = JUMP_FORCE;
+                    isGrounded = false;
+                    if (!isAttacking) fadeToAction('jump', 0.1);
+                }
+
+                // Animaation tila (jos ei hyökkää)
+                if (!isAttacking && mixer) {
+                    if (isGrounded) {
+                        const isMoving = keys.w || keys.s || keys.a || keys.d;
+                        fadeToAction(isMoving ? 'run' : 'idle', 0.2);
+                    } else {
+                        fadeToAction('jump', 0.5); // Fallback jos ilmassa
+                    }
+                }
+
+            } else {
+                // Jos ei lukittu, pysähdy
+                playerVelocity.x = 0;
+                playerVelocity.z = 0;
+            }
+
+            // Fysiikka
+            playerVelocity.y -= GRAVITY * delta;
+            playerPivot.position.addScaledVector(playerVelocity, delta);
+
+            // Törmäys maahan
+            const terrainHeight = getTerrainHeight(playerPivot.position.x, playerPivot.position.z);
+            if (playerPivot.position.y < terrainHeight + 1) { // Pivotin keskipiste on ylhäällä, mesh alkaa -1
+                playerPivot.position.y = terrainHeight + 1;
+                playerVelocity.y = 0;
+                isGrounded = true;
+            }
+
+            // Kameran päivitys: Kamera seuraa pivotia
+            // PointerLockControls hallitsee kameran rotaatiota, meidän täytyy vain siirtää kamera pivotin luo
+            // Mutta haluamme Third Person -etäisyyden.
+            // Yksinkertainen tapa PointerLockControlsilla on laittaa kamera pivotin lapseksi,
+            // mutta silloin kamera kääntyy pivotin mukana (joka kääntyy kävellessä).
+            // Parempi: Kamera pysyy pivotin sijainnissa, ja siirrämme sen taaksepäin "dolly"-logiikalla.
+            
+            // Tässä yksinkertaistuksessa: Kamera on kiinni pivotissa, mutta siirretään manuaalisesti
+            // Koska PointerLockControls liikuttaa kameraa, meidän täytyy synkronoida sijainti
+            camera.position.copy(playerPivot.position);
+            camera.position.y += 2; // Nostetaan silmien tasolle
+            
+            // Siirrä kameraa taaksepäin sen omasta katselusuunnasta (Third Person)
+            const cameraOffset = new THREE.Vector3(0, 0, 4); // 4 yksikköä taakse
+            cameraOffset.applyQuaternion(camera.quaternion);
+            camera.position.add(cameraOffset);
+            
+            // Tarkista ettei kamera mene maan alle
+            const camTerrainH = getTerrainHeight(camera.position.x, camera.position.z);
+            if(camera.position.y < camTerrainH + 0.5) camera.position.y = camTerrainH + 0.5;
+
+            // Päivitä animaatiot
+            if (mixer) mixer.update(delta);
+            
+            updateChunks();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
