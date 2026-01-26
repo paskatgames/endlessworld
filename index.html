@@ -2,34 +2,31 @@
 <html lang="fi">
 <head>
     <meta charset="UTF-8">
-    <title>Three.js RPG - Day/Night & Loot</title>
+    <title>Three.js RPG - Shaders & Models</title>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
         #ui {
             position: absolute; top: 15px; left: 15px; color: white; pointer-events: none;
-            background: rgba(0,0,0,0.75); padding: 15px; border-radius: 12px; border: 1px solid #555;
+            background: rgba(0,0,0,0.8); padding: 15px; border-radius: 12px; border: 1px solid #444;
         }
         .bar-container { width: 220px; height: 16px; background: #222; border: 1px solid #777; margin: 6px 0; border-radius: 8px; overflow: hidden; }
         #hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #ff4444, #aa0000); transition: 0.3s; }
         #xp-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #44ccff, #0066ff); transition: 0.3s; }
-        #stats { font-size: 13px; color: #00ffcc; font-weight: bold; }
-        #time-txt { position: absolute; top: 15px; right: 15px; color: white; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px; }
         #blocker {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85); display: flex; align-items: center;
-            justify-content: center; color: white; font-size: 26px; cursor: pointer; z-index: 1000;
+            background: rgba(0,0,0,0.9); display: flex; align-items: center;
+            justify-content: center; color: white; font-size: 24px; cursor: pointer; z-index: 1000;
         }
     </style>
 </head>
 <body>
     <div id="ui">
-        <b style="font-size: 18px;">LEVEL <span id="lvl-txt">1</span></b>
-        <div style="margin-top:10px;">HP</div><div class="bar-container"><div id="hp-bar"></div></div>
-        <div>XP</div><div class="bar-container"><div id="xp-bar"></div></div>
-        <div id="stats">Alustetaan...</div>
+        <b>LEVEL <span id="lvl-txt">1</span></b>
+        <div class="bar-container"><div id="hp-bar"></div></div>
+        <div class="bar-container"><div id="xp-bar"></div></div>
+        <div id="stats" style="font-size: 12px; color: #0f0;">Stats: Loading...</div>
     </div>
-    <div id="time-txt">Kello: 12:00</div>
-    <div id="blocker">KLIKKAA JATKAAKSESI SEIKKAILUA</div>
+    <div id="blocker">KLIKKAA ALOITTAAKSESI</div>
 
     <script type="importmap">
         {
@@ -47,9 +44,15 @@
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
-        const CONFIG = { CHUNK_SIZE: 60, DRAW_DISTANCE: 2, PLAYER_HEIGHT: 1.1, WATER_LEVEL: -2.5 };
+        // --- MÄÄRITYKSET ---
+        const CONFIG = {
+            CHUNK_SIZE: 60,
+            WATER_LEVEL: -2.5,
+            PROP_FILES: ['tree.glb', 'rock.glb', 'flower.glb', 'bush.glb'], // Lisää tiedostonimet tänne
+            ENEMY_MODEL: './enemies/enemy1.glb'
+        };
+
         const PLAYER = { hp: 100, maxHp: 100, level: 1, xp: 0, nextLvl: 100, baseDmg: 40, speed: 14, jump: 23 };
-        let gameTime = 0.5; // 0-1, 0.5 = keskipäivä
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -61,213 +64,243 @@
         const controls = new PointerLockControls(camera, document.body);
         document.getElementById('blocker').addEventListener('click', () => controls.lock());
 
-        // --- VALAISTUS ---
-        const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-        sun.castShadow = true;
-        scene.add(sun);
-        const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x444444, 0.6);
-        scene.add(hemiLight);
-
         const loader = new GLTFLoader();
-        let mixer, playerMesh, isAttacking = false, isGrounded = false, animations = {};
-        let flowerModel = null;
-        const playerPivot = new THREE.Group();
-        scene.add(playerPivot);
-
-        loader.load('./flower.glb', (gltf) => { flowerModel = gltf.scene; });
-
         const noise2D = createNoise2D();
         const chunks = new Map();
-        const enemies = [], potions = [], particles = [];
+        const enemies = [], potions = [], loadedProps = [];
+        let enemyBaseMesh = null;
 
+        // --- VALAISTUS JA TAIVAS ---
+        const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+        sun.position.set(50, 100, 50);
+        sun.castShadow = true;
+        scene.add(sun);
+        scene.add(new THREE.AmbientLight(0x404040, 0.6));
+
+        // --- MATERIAALIT (SHADERS) ---
+        const waterMaterial = new THREE.MeshStandardMaterial({
+            color: 0x0077ff,
+            transparent: true,
+            opacity: 0.8,
+            roughness: 0.1,
+        });
+
+        // Lisätään aallot shader-muokkauksella
+        waterMaterial.onBeforeCompile = (shader) => {
+            shader.uniforms.time = { value: 0 };
+            shader.vertexShader = `
+                uniform float time;
+                ${shader.vertexShader}
+            `.replace(
+                `#include <begin_vertex>`,
+                `
+                vec3 transformed = vec3(position);
+                transformed.y += sin(transformed.x * 0.5 + time) * 0.2 + cos(transformed.z * 0.5 + time) * 0.2;
+                `
+            );
+            waterMaterial.userData.shader = shader;
+        };
+
+        // --- MALLIEN LATAUS ---
+        // Ladataan vihollinen
+        loader.load(CONFIG.ENEMY_MODEL, 
+            (gltf) => { enemyBaseMesh = gltf; },
+            undefined, 
+            () => { console.warn("Enemy model not found, using fallback."); }
+        );
+
+        // Ladataan propsit
+        CONFIG.PROP_FILES.forEach(file => {
+            loader.load(`./mallit/${file}`, (gltf) => {
+                loadedProps.push(gltf.scene);
+            });
+        });
+
+        // --- MAASTON GENERUUS ---
         function getHeight(x, z) {
-            let y = noise2D(x * 0.015, z * 0.015) * 12;
-            y += noise2D(x * 0.06, z * 0.06) * 2;
-            return y;
+            return noise2D(x * 0.015, z * 0.015) * 12 + noise2D(x * 0.05, z * 0.05) * 2;
         }
 
         function createChunk(cX, cZ) {
             const group = new THREE.Group();
-            const geo = new THREE.PlaneGeometry(CONFIG.CHUNK_SIZE, CONFIG.CHUNK_SIZE, 32, 32);
-            geo.rotateX(-Math.PI/2);
+            const geo = new THREE.PlaneGeometry(60, 60, 64, 64);
+            geo.rotateX(-Math.PI / 2);
+
             const pos = geo.attributes.position;
             const colors = new Float32Array(pos.count * 3);
-            for(let i=0; i<pos.count; i++) {
-                const px = pos.getX(i) + cX*60, pz = pos.getZ(i) + cZ*60;
+            for (let i = 0; i < pos.count; i++) {
+                const px = pos.getX(i) + cX * 60, pz = pos.getZ(i) + cZ * 60;
                 const h = getHeight(px, pz);
                 pos.setY(i, h);
-                let col = new THREE.Color(h < -1.5 ? 0xd2b48c : h > 7 ? 0x555555 : 0x2d5a27);
-                if(h > 11) col.set(0xeeeeee);
-                col.toArray(colors, i*3);
+
+                let col = new THREE.Color();
+                if (h < -1.8) col.set(0xd2b48c); // Hiekka
+                else if (h < 6) col.set(0x3a6629); // Ruoho
+                else if (h < 10) col.set(0x666666); // Kivi
+                else col.set(0xffffff); // Lumi
+                col.toArray(colors, i * 3);
             }
             geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
             geo.computeVertexNormals();
-            const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true }));
+
+            const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }));
             ground.receiveShadow = true;
+            ground.name = "ground";
             group.add(ground);
 
-            const water = new THREE.Mesh(new THREE.PlaneGeometry(60,60), new THREE.MeshStandardMaterial({color:0x0044ff, transparent:true, opacity:0.6}));
-            water.rotation.x = -Math.PI/2; water.position.y = CONFIG.WATER_LEVEL;
+            const water = new THREE.Mesh(new THREE.PlaneGeometry(60, 60, 32, 32), waterMaterial);
+            water.rotation.x = -Math.PI / 2;
+            water.position.y = CONFIG.WATER_LEVEL;
             group.add(water);
 
-            // Propsit Raycasterilla
+            // Propsi-spawnaus
             const ray = new THREE.Raycaster();
-            for(let i=0; i<10; i++){
-                const rx = (Math.random()-0.5)*60, rz = (Math.random()-0.5)*60;
-                ray.set(new THREE.Vector3(rx + cX*60, 50, rz + cZ*60), new THREE.Vector3(0,-1,0));
+            for (let i = 0; i < 12; i++) {
+                const rx = (Math.random() - 0.5) * 55, rz = (Math.random() - 0.5) * 55;
+                ray.set(new THREE.Vector3(rx + cX * 60, 50, rz + cZ * 60), new THREE.Vector3(0, -1, 0));
                 const hits = ray.intersectObject(ground);
-                if(hits.length > 0 && hits[0].point.y > -1.2) {
-                    const tree = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.4, 3), new THREE.MeshStandardMaterial({color:0x331a00}));
-                    tree.position.set(rx + cX*60, hits[0].point.y + 1.5, rz + cZ*60);
-                    scene.add(tree);
+                if (hits.length > 0 && hits[0].point.y > -1.5) {
+                    if (loadedProps.length > 0) {
+                        const prop = loadedProps[Math.floor(Math.random() * loadedProps.length)].clone();
+                        prop.position.set(rx + cX * 60, hits[0].point.y, rz + cZ * 60);
+                        scene.add(prop);
+                    } else {
+                        // Fallback: Vihreä kuutio
+                        const cube = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshStandardMaterial({ color: 0x00ff00 }));
+                        cube.position.set(rx + cX * 60, hits[0].point.y + 1, rz + cZ * 60);
+                        scene.add(cube);
+                    }
                 }
             }
 
-            if(Math.random() > 0.7) spawnEnemy(cX*60 + (Math.random()-0.5)*30, cZ*60 + (Math.random()-0.5)*30);
+            if (Math.random() > 0.6) spawnEnemy(cX * 60 + (Math.random() - 0.5) * 40, cZ * 60 + (Math.random() - 0.5) * 40);
 
-            group.position.set(cX*60, 0, cZ*60);
+            group.position.set(cX * 60, 0, cZ * 60);
             scene.add(group);
             chunks.set(`${cX},${cZ}`, group);
         }
 
+        // --- VIHANSIA (ENEMIES) ---
         function spawnEnemy(x, z) {
             const group = new THREE.Group();
-            group.position.set(x, 10, z);
-            group.userData = { hp: 100, maxHp: 100, lastAttack: 0 };
-            const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2, 1.6), new THREE.MeshStandardMaterial({color:0x221111}));
-            group.add(mesh);
-            const hpF = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.15), new THREE.MeshBasicMaterial({color:0x00ff00}));
-            hpF.position.y = 2.5; group.userData.hpFill = hpF; group.add(hpF);
+            group.position.set(x, 15, z);
+            
+            let model, mixer, enemyAnims = {};
+            
+            if (enemyBaseMesh) {
+                model = THREE.SkeletonUtils.clone(enemyBaseMesh.scene);
+                mixer = new THREE.AnimationMixer(model);
+                enemyBaseMesh.animations.forEach(clip => {
+                    enemyAnims[clip.name.toLowerCase()] = mixer.clipAction(clip);
+                });
+                enemyAnims['idle']?.play();
+            } else {
+                // Fallback: Musta kuutio
+                model = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshStandardMaterial({ color: 0x000000 }));
+            }
+
+            group.add(model);
+            group.userData = { 
+                hp: 100, maxHp: 100, 
+                mixer: mixer, anims: enemyAnims, 
+                state: 'idle', lastAttack: 0 
+            };
+
+            const hpF = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.15), new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+            hpF.position.y = 3; group.userData.hpFill = hpF; group.add(hpF);
+
             scene.add(group);
             enemies.push(group);
         }
 
+        // --- PELAAJAN SETUP JA LIIKE ---
+        let playerMixer, playerAnims = {};
+        const playerPivot = new THREE.Group();
+        scene.add(playerPivot);
+
         loader.load('./chars/testchard.glb', (gltf) => {
-            playerMesh = gltf.scene;
-            playerMesh.position.y = -CONFIG.PLAYER_HEIGHT;
-            playerMesh.rotation.y = Math.PI;
-            playerPivot.add(playerMesh);
-            mixer = new THREE.AnimationMixer(playerMesh);
-            gltf.animations.forEach(a => animations[a.name.toLowerCase()] = mixer.clipAction(a));
-            animations['idle']?.play();
+            const model = gltf.scene;
+            model.rotation.y = Math.PI;
+            model.position.y = -1.1;
+            playerPivot.add(model);
+            playerMixer = new THREE.AnimationMixer(model);
+            gltf.animations.forEach(a => playerAnims[a.name.toLowerCase()] = playerMixer.clipAction(a));
+            playerAnims['idle']?.play();
         });
-
-        function updateUI() {
-            document.getElementById('lvl-txt').innerText = PLAYER.level;
-            document.getElementById('hp-bar').style.width = Math.max(0, (PLAYER.hp/PLAYER.maxHp)*100) + "%";
-            document.getElementById('xp-bar').style.width = (PLAYER.xp/PLAYER.nextLvl)*100 + "%";
-            document.getElementById('stats').innerText = `DMG: ${PLAYER.baseDmg}-${PLAYER.baseDmg+30} | SPD: ${PLAYER.speed}`;
-        }
-
-        function dropLoot(pos) {
-            if(Math.random() > 0.6 && flowerModel) { // 40% chance
-                const p = flowerModel.clone();
-                p.position.copy(pos);
-                p.position.y += 0.5;
-                scene.add(p);
-                potions.push(p);
-            }
-        }
 
         const keys = {}, vel = new THREE.Vector3();
         window.addEventListener('keydown', e => keys[e.code] = true);
         window.addEventListener('keyup', e => keys[e.code] = false);
 
-        window.addEventListener('mousedown', (e) => {
-            if(controls.isLocked && !isAttacking && e.button === 0) {
-                isAttacking = true;
-                if(animations['kick']) {
-                    animations['kick'].reset().setLoop(THREE.LoopOnce).play();
-                    setTimeout(() => checkHit(), 300);
-                    mixer.addEventListener('finished', () => isAttacking = false, {once: true});
-                } else { setTimeout(() => isAttacking = false, 500); checkHit(); }
-            }
-        });
-
-        function checkHit() {
-            enemies.forEach((en, i) => {
-                if(en.position.distanceTo(playerPivot.position) < 3.8) {
-                    en.userData.hp -= PLAYER.baseDmg + Math.random()*40;
-                    en.userData.hpFill.scale.x = Math.max(0, en.userData.hp/en.userData.maxHp);
-                    if(en.userData.hp <= 0) {
-                        dropLoot(en.position);
-                        scene.remove(en); enemies.splice(i, 1);
-                        PLAYER.xp += 40;
-                        if(PLAYER.xp >= PLAYER.nextLvl){ PLAYER.level++; PLAYER.xp=0; PLAYER.nextLvl+=50; PLAYER.baseDmg+=10; }
-                        updateUI();
-                    }
-                }
-            });
-        }
-
         const clock = new THREE.Clock();
         function animate() {
             requestAnimationFrame(animate);
             const dt = Math.min(clock.getDelta(), 0.1);
+            const time = performance.now() * 0.001;
 
-            // VUOROKAUDENAIKA
-            gameTime += dt * 0.01; // Säädä nopeutta tästä
-            if(gameTime > 1) gameTime = 0;
-            const sunAngle = gameTime * Math.PI * 2;
-            sun.position.set(Math.cos(sunAngle)*100, Math.sin(sunAngle)*100, 50);
-            
-            const skyColor = new THREE.Color().setHSL(0.6, 0.5, Math.max(0.1, Math.sin(sunAngle)));
-            scene.background = skyColor;
-            scene.fog = new THREE.Fog(skyColor, 20, 140);
-            sun.intensity = Math.max(0, Math.sin(sunAngle)) * 2;
-            
-            const hours = Math.floor(gameTime * 24);
-            const mins = Math.floor((gameTime * 24 % 1) * 60);
-            document.getElementById('time-txt').innerText = `Kello: ${hours.toString().padStart(2,'0')}:${mins.toString().padStart(2,'0')}`;
+            if (waterMaterial.userData.shader) waterMaterial.userData.shader.uniforms.time.value = time;
 
-            if(controls.isLocked) {
-                if(!isAttacking) {
-                    const camF = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion); camF.y = 0; camF.normalize();
-                    const camR = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); camR.y = 0; camR.normalize();
-                    const move = new THREE.Vector3();
-                    if(keys['KeyW']) move.add(camF); if(keys['KeyS']) move.sub(camF);
-                    if(keys['KeyD']) move.add(camR); if(keys['KeyA']) move.sub(camR);
-                    if(move.length() > 0) {
-                        move.normalize(); vel.x = move.x * PLAYER.speed; vel.z = move.z * PLAYER.speed;
+            if (controls.isLocked) {
+                const camF = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion); camF.y = 0; camF.normalize();
+                const camR = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion); camR.y = 0; camR.normalize();
+                const move = new THREE.Vector3();
+
+                if (!playerAnims['kick']?.isRunning()) {
+                    if (keys['KeyW']) move.add(camF); if (keys['KeyS']) move.sub(camF);
+                    if (keys['KeyD']) move.add(camR); if (keys['KeyA']) move.sub(camR);
+
+                    if (move.length() > 0) {
+                        move.normalize();
+                        vel.x = move.x * PLAYER.speed; vel.z = move.z * PLAYER.speed;
                         playerPivot.rotation.y = Math.atan2(move.x, move.z) + Math.PI;
-                        animations['run']?.play();
-                    } else { vel.x *= 0.1; vel.z *= 0.1; animations['run']?.stop(); }
-                    if(keys['Space'] && isGrounded) { vel.y = PLAYER.jump; isGrounded = false; animations['jump']?.reset().setLoop(THREE.LoopOnce).play(); }
-                } else { vel.x = 0; vel.z = 0; }
+                        playerAnims['run']?.play();
+                    } else {
+                        vel.x *= 0.1; vel.z *= 0.1;
+                        playerAnims['run']?.stop();
+                    }
+                }
 
                 vel.y -= 50 * dt;
                 playerPivot.position.addScaledVector(vel, dt);
                 const gh = getHeight(playerPivot.position.x, playerPivot.position.z);
-                if(playerPivot.position.y < gh + CONFIG.PLAYER_HEIGHT) { playerPivot.position.y = gh + CONFIG.PLAYER_HEIGHT; vel.y = 0; isGrounded = true; }
+                if (playerPivot.position.y < gh + 1.1) { playerPivot.position.y = gh + 1.1; vel.y = 0; }
+
                 camera.position.copy(playerPivot.position).add(new THREE.Vector3(0, 5, 10).applyQuaternion(camera.quaternion));
             }
 
-            potions.forEach((p, i) => {
-                p.rotation.y += dt * 3;
-                if(p.position.distanceTo(playerPivot.position) < 2) {
-                    PLAYER.hp = Math.min(PLAYER.maxHp, PLAYER.hp + 35);
-                    scene.remove(p); potions.splice(i, 1); updateUI();
-                }
-            });
-
-            enemies.forEach(en => {
-                const d = en.position.distanceTo(playerPivot.position);
-                if(d < 15 && d > 1.8) en.position.addScaledVector(new THREE.Vector3().subVectors(playerPivot.position, en.position).normalize(), 5 * dt);
-                if(d < 2.0 && performance.now() - en.userData.lastAttack > 1200) {
-                    PLAYER.hp -= 15; en.userData.lastAttack = performance.now(); updateUI();
-                    if(PLAYER.hp <= 0) { alert("Sankari kaatui..."); location.reload(); }
+            // Vihollisten tekoäly ja animaatiot
+            enemies.forEach((en, i) => {
+                if (en.userData.mixer) en.userData.mixer.update(dt);
+                const dist = en.position.distanceTo(playerPivot.position);
+                
+                if (dist < 15 && dist > 2) {
+                    en.position.addScaledVector(new THREE.Vector3().subVectors(playerPivot.position, en.position).normalize(), 5 * dt);
+                    en.lookAt(playerPivot.position.x, en.position.y, playerPivot.position.z);
+                    if (en.userData.state !== 'run') {
+                        en.userData.anims['idle']?.stop();
+                        en.userData.anims['run']?.play();
+                        en.userData.state = 'run';
+                    }
+                } else if (dist <= 2) {
+                    if (performance.now() - en.userData.lastAttack > 1500) {
+                        en.userData.anims['attack']?.reset().play();
+                        PLAYER.hp -= 10;
+                        en.userData.lastAttack = performance.now();
+                        document.getElementById('hp-bar').style.width = (PLAYER.hp/PLAYER.maxHp)*100 + "%";
+                    }
                 }
                 en.position.y = getHeight(en.position.x, en.position.z) + 1;
                 en.userData.hpFill.lookAt(camera.position);
             });
 
-            const pCX = Math.round(playerPivot.position.x/60), pCZ = Math.round(playerPivot.position.z/60);
-            for(let x=-2; x<=2; x++) for(let z=-2; z<=2; z++) if(!chunks.has(`${pCX+x},${pCZ+z}`)) createChunk(pCX+x, pCZ+z);
+            // Chunkien hallinta
+            const pCX = Math.round(playerPivot.position.x / 60), pCZ = Math.round(playerPivot.position.z / 60);
+            for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) if (!chunks.has(`${pCX + x},${pCZ + z}`)) createChunk(pCX + x, pCZ + z);
 
-            if(mixer) mixer.update(dt);
+            if (playerMixer) playerMixer.update(dt);
             renderer.render(scene, camera);
         }
-        updateUI();
+
         animate();
     </script>
 </body>
