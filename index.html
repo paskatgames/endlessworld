@@ -2,35 +2,35 @@
 <html lang="fi">
 <head>
     <meta charset="UTF-8">
-    <title>Three.js RPG - Full Game</title>
+    <title>Three.js RPG - Battle & Raycast</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        #info {
+        body { margin: 0; overflow: hidden; background: #000; }
+        #ui {
             position: absolute; top: 10px; left: 10px;
-            color: white; font-family: sans-serif; font-weight: bold;
-            background: rgba(0,0,0,0.6); padding: 15px;
-            pointer-events: none; user-select: none; border-radius: 8px;
+            color: white; font-family: sans-serif; pointer-events: none;
+        }
+        .bar-container {
+            width: 200px; height: 20px; background: rgba(0,0,0,0.5);
+            border: 2px solid #fff; border-radius: 10px; overflow: hidden;
+        }
+        #hp-bar {
+            width: 100%; height: 100%; background: #ff3333;
+            transition: width 0.2s ease-out;
         }
         #blocker {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.8);
-            display: flex; align-items: center; justify-content: center;
-            color: white; font-family: sans-serif; font-size: 24px;
-            cursor: pointer; z-index: 999;
-        }
-        #loading {
-            position: absolute; bottom: 20px; right: 20px; 
-            color: #00ff00; font-family: monospace; font-size: 18px;
+            background: rgba(0,0,0,0.7); display: flex; align-items: center;
+            justify-content: center; color: white; font-family: sans-serif;
+            font-size: 24px; cursor: pointer; z-index: 999;
         }
     </style>
 </head>
 <body>
-    <div id="info">
-        WASD = Liiku | SPACE = Hyppää<br>
-        HIIRI = Käänny | LMB = Potkaise (Pysäyttää liikkeen)
+    <div id="ui">
+        <div style="margin-bottom: 5px;">PLAYER HEALTH</div>
+        <div class="bar-container"><div id="hp-bar"></div></div>
     </div>
-    <div id="loading">Ladataan resursseja...</div>
-    <div id="blocker">KLIKKAA TÄSTÄ ALOITTAAKSESI</div>
+    <div id="blocker">KLIKKAA PELATAKSESI</div>
 
     <script type="importmap">
         {
@@ -48,228 +48,181 @@
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
-        // --- KONFIGURAATIO ---
+        // --- ASETUKSET ---
         const CONFIG = {
             CHUNK_SIZE: 60,
             DRAW_DISTANCE: 2,
-            SPEED: 12,
-            JUMP_FORCE: 18,
-            GRAVITY: 45,
-            PLAYER_HEIGHT_OFFSET: 0.0, // Raycaster hoitaa korkeuden, pivot on jaloissa
-            AVAILABLE_MODELS: ['tree.glb', 'rock.glb', 'flower.glb', 'bush.glb'] 
+            PLAYER_MAX_HP: 100,
+            AVAILABLE_MODELS: ['tree.glb', 'rock.glb', 'bush.glb']
         };
 
-        // --- SCENE ALUSTUS ---
+        let playerHP = CONFIG.PLAYER_MAX_HP;
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87CEEB);
-        scene.fog = new THREE.Fog(0x87CEEB, 20, CONFIG.CHUNK_SIZE * (CONFIG.DRAW_DISTANCE + 0.5));
-
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.body.appendChild(renderer.domElement);
 
-        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.5);
-        scene.add(hemiLight);
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-        dirLight.position.set(50, 100, 50);
-        dirLight.castShadow = true;
-        dirLight.shadow.camera.top = 100; dirLight.shadow.camera.bottom = -100;
-        dirLight.shadow.camera.left = -100; dirLight.shadow.camera.right = 100;
-        dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048;
-        scene.add(dirLight);
+        const light = new THREE.DirectionalLight(0xffffff, 1.2);
+        light.position.set(50, 100, 50);
+        light.castShadow = true;
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-        // --- SHADERIT ---
-        const waterVertexShader = `
-            uniform float uTime;
-            varying float vElevation;
-            void main() {
-                vec3 pos = position;
-                float elevation = sin(pos.x * 0.5 + uTime) * 0.2 + sin(pos.y * 0.5 + uTime) * 0.2;
-                pos.z += elevation;
-                vElevation = elevation;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
-            }
-        `;
-        const waterFragmentShader = `
-            varying float vElevation;
-            void main() {
-                float mixFactor = (vElevation + 0.4) * 1.5;
-                vec3 color = mix(vec3(0.0, 0.3, 0.7), vec3(1.0, 1.0, 1.0), mixFactor * 0.3);
-                gl_FragColor = vec4(color, 0.8);
-            }
-        `;
-        const waterMaterial = new THREE.ShaderMaterial({
-            vertexShader: waterVertexShader,
-            fragmentShader: waterFragmentShader,
-            uniforms: { uTime: { value: 0 } },
-            transparent: true
-        });
-
-        // --- PELAAJA JA KONTROLLIT ---
+        // --- PELAAJA & KONTROLLIT ---
         const playerPivot = new THREE.Group();
         scene.add(playerPivot);
-
         const controls = new PointerLockControls(camera, document.body);
-        const blocker = document.getElementById('blocker');
-        blocker.addEventListener('click', () => controls.lock());
-        controls.addEventListener('lock', () => blocker.style.display = 'none');
-        controls.addEventListener('unlock', () => blocker.style.display = 'flex');
+        document.getElementById('blocker').addEventListener('click', () => controls.lock());
+        controls.addEventListener('lock', () => document.getElementById('blocker').style.display = 'none');
+        controls.addEventListener('unlock', () => document.getElementById('blocker').style.display = 'flex');
 
         const loader = new GLTFLoader();
-        let mixer, playerMesh, isAttacking = false, currentAction = 'idle';
-        const animationsMap = {};
-
+        let mixer, playerMesh, isAttacking = false, animations = {};
+        
         loader.load('./chars/testchard.glb', (gltf) => {
             playerMesh = gltf.scene;
-            playerMesh.traverse(c => { if(c.isMesh) c.castShadow = true; });
             playerMesh.rotation.y = Math.PI;
+            playerMesh.position.y = -1.1;
             playerPivot.add(playerMesh);
             mixer = new THREE.AnimationMixer(playerMesh);
-            gltf.animations.forEach(clip => {
-                animationsMap[clip.name.toLowerCase()] = mixer.clipAction(clip);
-            });
-            fadeToAction('idle', 0.2);
-            document.getElementById('loading').style.display = 'none';
-        }, undefined, () => {
-            const geo = new THREE.BoxGeometry(1, 2, 1);
-            playerMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color: 0xff0000}));
-            playerMesh.position.y = 1;
-            playerPivot.add(playerMesh);
-            document.getElementById('loading').style.display = 'none';
+            gltf.animations.forEach(a => animations[a.name.toLowerCase()] = mixer.clipAction(a));
+            animations['idle']?.play();
         });
 
-        function fadeToAction(name, duration) {
-            if(!animationsMap[name] || currentAction === name) return;
-            const prev = animationsMap[currentAction];
-            const active = animationsMap[name];
-            if(prev) prev.fadeOut(duration);
-            active.reset().fadeIn(duration).play();
-            currentAction = name;
-        }
-
-        // --- MAAILMAN GENERINTI ---
+        // --- MAAILMA ---
         const noise2D = createNoise2D();
         const chunks = new Map();
         const enemies = [];
+        const particles = [];
 
-        function getTerrainHeight(x, z) {
-            let y = noise2D(x * 0.012, z * 0.012) * 10;
-            y += noise2D(x * 0.05, z * 0.05) * 2;
-            return y < -3 ? -3.5 : y;
+        function getHeight(x, z) {
+            return noise2D(x * 0.02, z * 0.02) * 6 + noise2D(x * 0.05, z * 0.05) * 2;
         }
 
-        function spawnProp(localX, localZ, parentGroup, groundMesh) {
-            const raycaster = new THREE.Raycaster(new THREE.Vector3(localX, 50, localZ), new THREE.Vector3(0, -1, 0));
-            const intersects = raycaster.intersectObject(groundMesh);
+        // Raycaster-sijoittelu propseille
+        function spawnPropWithRaycast(localX, localZ, group, groundMesh) {
+            const ray = new THREE.Raycaster(new THREE.Vector3(localX, 50, localZ), new THREE.Vector3(0, -1, 0));
+            const intersect = ray.intersectObject(groundMesh);
+            
+            if (intersect.length > 0) {
+                const y = intersect[0].point.y;
+                if (y < -1.5) return;
 
-            if (intersects.length > 0) {
-                const hitY = intersects[0].point.y;
-                if (hitY < -1.5) return;
-
-                const modelName = CONFIG.AVAILABLE_MODELS[Math.floor(Math.random() * CONFIG.AVAILABLE_MODELS.length)];
-                loader.load(`./mallit/${modelName}`, (gltf) => {
-                    const model = gltf.scene;
-                    model.position.set(localX, hitY, localZ);
-                    model.scale.setScalar(0.7 + Math.random() * 0.7);
-                    model.rotation.y = Math.random() * Math.PI * 2;
-                    model.traverse(c => { if(c.isMesh) { c.castShadow = true; c.receiveShadow = true; }});
-                    parentGroup.add(model);
+                const name = CONFIG.AVAILABLE_MODELS[Math.floor(Math.random() * CONFIG.AVAILABLE_MODELS.length)];
+                loader.load(`./mallit/${name}`, (gltf) => {
+                    const m = gltf.scene;
+                    m.position.set(localX, y, localZ);
+                    m.rotation.y = Math.random() * Math.PI;
+                    m.scale.setScalar(0.8 + Math.random() * 0.5);
+                    group.add(m);
                 }, undefined, () => {
-                    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshStandardMaterial({color: 0x228B22}));
-                    mesh.position.set(localX, hitY + 1, localZ);
-                    mesh.castShadow = true;
-                    parentGroup.add(mesh);
+                    const box = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshStandardMaterial({color: 0x228b22}));
+                    box.position.set(localX, y + 1, localZ);
+                    group.add(box);
                 });
             }
         }
 
-        function spawnEnemy(wX, wZ) {
-            const enemyGroup = new THREE.Group();
-            enemyGroup.position.set(wX, 20, wZ);
-            enemyGroup.userData = { state: 'idle', mixer: null, actions: {} };
+        function createExplosion(pos) {
+            for(let i=0; i<15; i++) {
+                const size = 0.2 + Math.random() * 0.3;
+                const p = new THREE.Mesh(
+                    new THREE.BoxGeometry(size, size, size),
+                    new THREE.MeshStandardMaterial({color: 0x333333})
+                );
+                p.position.copy(pos);
+                p.userData.vel = new THREE.Vector3(
+                    (Math.random()-0.5)*10, Math.random()*10, (Math.random()-0.5)*10
+                );
+                p.userData.life = 1.0;
+                scene.add(p);
+                particles.push(p);
+            }
+        }
 
-            loader.load('./enemies/enemy1.glb', (gltf) => {
-                const model = gltf.scene;
-                enemyGroup.add(model);
-                const mix = new THREE.AnimationMixer(model);
-                enemyGroup.userData.mixer = mix;
-                gltf.animations.forEach(c => enemyGroup.userData.actions[c.name.toLowerCase()] = mix.clipAction(c));
-                if(enemyGroup.userData.actions['idle']) enemyGroup.userData.actions['idle'].play();
-            }, undefined, () => {
-                enemyGroup.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 1.2), new THREE.MeshStandardMaterial({color: 0x000000})));
-            });
-            scene.add(enemyGroup);
-            enemies.push(enemyGroup);
+        function spawnEnemy(x, z) {
+            const group = new THREE.Group();
+            group.position.set(x, 20, z);
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.2, 2, 1.2), new THREE.MeshStandardMaterial({color: 0x111111}));
+            group.add(mesh);
+            scene.add(group);
+            enemies.push(group);
         }
 
         function createChunk(cX, cZ) {
             const group = new THREE.Group();
-            const geo = new THREE.PlaneGeometry(CONFIG.CHUNK_SIZE, CONFIG.CHUNK_SIZE, 32, 32);
-            geo.rotateX(-Math.PI / 2);
-
+            const geo = new THREE.PlaneGeometry(60, 60, 20, 20);
+            geo.rotateX(-Math.PI/2);
             const pos = geo.attributes.position;
-            const colors = new Float32Array(pos.count * 3);
-            const c1 = new THREE.Color(0x3e5e2e), c2 = new THREE.Color(0xd2b48c), c3 = new THREE.Color(0x808080);
-
-            for (let i = 0; i < pos.count; i++) {
-                const x = pos.getX(i) + cX * CONFIG.CHUNK_SIZE;
-                const z = pos.getZ(i) + cZ * CONFIG.CHUNK_SIZE;
-                const h = getTerrainHeight(x, z);
-                pos.setY(i, h);
-                const col = h < -1 ? c2 : (h < 6 ? c1 : c3);
-                col.toArray(colors, i * 3);
+            for(let i=0; i<pos.count; i++) {
+                pos.setY(i, getHeight(pos.getX(i) + cX*60, pos.getZ(i) + cZ*60));
             }
-            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
             geo.computeVertexNormals();
-
-            const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 }));
-            ground.receiveShadow = true; ground.castShadow = true;
+            const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color: 0x557744}));
+            ground.receiveShadow = true;
             group.add(ground);
 
-            const water = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.CHUNK_SIZE, CONFIG.CHUNK_SIZE).rotateX(-Math.PI/2), waterMaterial);
-            water.position.y = -2.5;
-            group.add(water);
+            for(let i=0; i<6; i++) {
+                spawnPropWithRaycast((Math.random()-0.5)*50, (Math.random()-0.5)*50, group, ground);
+            }
+            if(Math.random() > 0.6) spawnEnemy(cX*60 + (Math.random()-0.5)*40, cZ*60 + (Math.random()-0.5)*40);
 
-            for(let i=0; i<6; i++) spawnProp((Math.random()-0.5)*CONFIG.CHUNK_SIZE, (Math.random()-0.5)*CONFIG.CHUNK_SIZE, group, ground);
-            if(Math.random() > 0.7) spawnEnemy(cX * CONFIG.CHUNK_SIZE, cZ * CONFIG.CHUNK_SIZE);
-
-            group.position.set(cX * CONFIG.CHUNK_SIZE, 0, cZ * CONFIG.CHUNK_SIZE);
+            group.position.set(cX*60, 0, cZ*60);
             scene.add(group);
-            return group;
+            chunks.set(`${cX},${cZ}`, group);
         }
 
-        // --- LOGIIKKA ---
-        const keys = {}, playerVelocity = new THREE.Vector3();
-        let isGrounded = false;
-        const clock = new THREE.Clock();
+        // --- TAISTELU JA LIIKE ---
+        const keys = {}, vel = new THREE.Vector3();
+        window.addEventListener('keydown', e => keys[e.code] = true);
+        window.addEventListener('keyup', e => keys[e.code] = false);
 
-        window.addEventListener('keydown', (e) => keys[e.code] = true);
-        window.addEventListener('keyup', (e) => keys[e.code] = false);
-        window.addEventListener('mousedown', (e) => {
+        window.addEventListener('mousedown', e => {
             if(controls.isLocked && !isAttacking && e.button === 0) {
                 isAttacking = true;
-                playerVelocity.set(0, playerVelocity.y, 0);
-                fadeToAction('kick', 0.1);
-                const onFinish = (e) => {
-                    if(e.action.getClip().name.toLowerCase() === 'kick') {
-                        isAttacking = false;
-                        mixer.removeEventListener('finished', onFinish);
-                    }
-                };
-                mixer.addEventListener('finished', onFinish);
+                const kick = animations['kick'];
+                if(kick) {
+                    kick.reset().setLoop(THREE.LoopOnce).play();
+                    // Osuman tarkistus
+                    setTimeout(() => checkHit(), 300); 
+                    mixer.addEventListener('finished', () => isAttacking = false, {once: true});
+                } else {
+                    setTimeout(() => { isAttacking = false; checkHit(); }, 500);
+                }
             }
         });
 
+        function checkHit() {
+            const hitDist = 2.5;
+            // Pelaajan rintamasuunta
+            const forward = new THREE.Vector3(0,0,1).applyQuaternion(playerPivot.quaternion);
+            
+            for(let i=enemies.length-1; i>=0; i--) {
+                const en = enemies[i];
+                const toEnemy = new THREE.Vector3().subVectors(en.position, playerPivot.position);
+                const dist = toEnemy.length();
+                
+                // Tarkistetaan etäisyys ja onko vihollinen pelaajan edessä (pistetulo)
+                if(dist < hitDist) {
+                    createExplosion(en.position.clone());
+                    scene.remove(en);
+                    enemies.splice(i, 1);
+                }
+            }
+        }
+
+        const clock = new THREE.Clock();
+        let attackTimer = 0;
+
         function animate() {
             requestAnimationFrame(animate);
-            const delta = Math.min(clock.getDelta(), 0.1);
-            waterMaterial.uniforms.uTime.value = clock.getElapsedTime();
+            const dt = Math.min(clock.getDelta(), 0.1);
 
-            if (controls.isLocked) {
-                if (!isAttacking) {
+            if(controls.isLocked) {
+                if(!isAttacking) {
                     const camF = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion); camF.y = 0; camF.normalize();
                     const camR = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); camR.y = 0; camR.normalize();
                     const move = new THREE.Vector3();
@@ -278,67 +231,62 @@
 
                     if(move.length() > 0) {
                         move.normalize();
-                        playerVelocity.x = move.x * CONFIG.SPEED;
-                        playerVelocity.z = move.z * CONFIG.SPEED;
+                        vel.x = move.x * 12; vel.z = move.z * 12;
                         playerPivot.rotation.y = Math.atan2(move.x, move.z) + Math.PI;
-                        if(isGrounded) fadeToAction('run', 0.2);
+                        if(animations['run'] && !animations['run'].isRunning()) animations['run'].play();
                     } else {
-                        playerVelocity.x = 0; playerVelocity.z = 0;
-                        if(isGrounded) fadeToAction('idle', 0.2);
+                        vel.x *= 0.1; vel.z *= 0.1;
+                        animations['run']?.stop();
                     }
-                    if(keys['Space'] && isGrounded) { playerVelocity.y = CONFIG.JUMP_FORCE; isGrounded = false; fadeToAction('jump', 0.1); }
+                } else {
+                    vel.x = 0; vel.z = 0;
                 }
 
-                playerVelocity.y -= CONFIG.GRAVITY * delta;
-                playerPivot.position.addScaledVector(playerVelocity, delta);
-
-                const groundH = getTerrainHeight(playerPivot.position.x, playerPivot.position.z);
-                if(playerPivot.position.y < groundH) {
-                    playerPivot.position.y = groundH;
-                    playerVelocity.y = 0;
-                    isGrounded = true;
-                }
+                vel.y -= 40 * dt;
+                playerPivot.position.addScaledVector(vel, dt);
+                const groundH = getHeight(playerPivot.position.x, playerPivot.position.z);
+                if(playerPivot.position.y < groundH) { playerPivot.position.y = groundH; vel.y = 0; }
 
                 camera.position.copy(playerPivot.position);
-                camera.position.y += 3.5;
-                const offset = new THREE.Vector3(0, 0, 6.5).applyQuaternion(camera.quaternion);
-                camera.position.add(offset);
-                const camH = getTerrainHeight(camera.position.x, camera.position.z);
-                if(camera.position.y < camH + 1) camera.position.y = camH + 1;
-
-                enemies.forEach(en => {
-                    const d = en.position.distanceTo(playerPivot.position);
-                    if(d < 15 && d > 1.5) {
-                        en.position.addScaledVector(new THREE.Vector3().subVectors(playerPivot.position, en.position).normalize(), 5 * delta);
-                        en.lookAt(playerPivot.position.x, en.position.y, playerPivot.position.z);
-                    }
-                    const eH = getTerrainHeight(en.position.x, en.position.z);
-                    en.position.y = THREE.MathUtils.lerp(en.position.y, eH, 0.1);
-                    if(en.userData.mixer) en.userData.mixer.update(delta);
-                });
+                camera.position.y += 4;
+                camera.position.add(new THREE.Vector3(0,0,7).applyQuaternion(camera.quaternion));
             }
 
-            if(mixer) mixer.update(delta);
-            
-            const cX = Math.round(playerPivot.position.x / CONFIG.CHUNK_SIZE);
-            const cZ = Math.round(playerPivot.position.z / CONFIG.CHUNK_SIZE);
-            const active = new Set();
-            for(let x=-CONFIG.DRAW_DISTANCE; x<=CONFIG.DRAW_DISTANCE; x++) {
-                for(let z=-CONFIG.DRAW_DISTANCE; z<=CONFIG.DRAW_DISTANCE; z++) {
-                    const k = `${cX+x},${cZ+z}`; active.add(k);
-                    if(!chunks.has(k)) chunks.set(k, createChunk(cX+x, cZ+z));
+            // Vihollisten AI ja hyökkäys
+            attackTimer += dt;
+            enemies.forEach(en => {
+                const d = en.position.distanceTo(playerPivot.position);
+                if(d < 15 && d > 1.2) {
+                    en.position.addScaledVector(new THREE.Vector3().subVectors(playerPivot.position, en.position).normalize(), 5 * dt);
+                    en.lookAt(playerPivot.position.x, en.position.y, playerPivot.position.z);
                 }
+                // Vihollinen lyö
+                if(d < 1.8 && attackTimer > 1.0) {
+                    playerHP -= 10;
+                    attackTimer = 0;
+                    document.getElementById('hp-bar').style.width = playerHP + "%";
+                    if(playerHP <= 0) alert("KUOLIT!");
+                }
+                en.position.y = getHeight(en.position.x, en.position.z);
+            });
+
+            // Räjähdyspartikkelit
+            for(let i=particles.length-1; i>=0; i--) {
+                const p = particles[i];
+                p.userData.vel.y -= 20 * dt;
+                p.position.addScaledVector(p.userData.vel, dt);
+                p.userData.life -= dt;
+                if(p.userData.life <= 0) { scene.remove(p); particles.splice(i, 1); }
             }
-            chunks.forEach((obj, k) => { if(!active.has(k)) { scene.remove(obj); chunks.delete(k); }});
+
+            if(mixer) mixer.update(dt);
+            const cX = Math.round(playerPivot.position.x/60), cZ = Math.round(playerPivot.position.z/60);
+            for(let x=-1; x<=1; x++) for(let z=-1; z<=1; z++) {
+                if(!chunks.has(`${cX+x},${cZ+z}`)) createChunk(cX+x, cZ+z);
+            }
 
             renderer.render(scene, camera);
         }
-
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
         animate();
     </script>
 </body>
