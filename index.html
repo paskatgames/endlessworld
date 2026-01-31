@@ -2,19 +2,45 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>High-Fidelity Endless Flight Generator</title>
+    <title>High-Fidelity Endless Flight</title>
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Helvetica', sans-serif; }
-        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; pointer-events: none; }
-        #controls-help { position: absolute; bottom: 20px; left: 20px; color: rgba(255,255,255,0.7); pointer-events: none; }
+        
+        #loading { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            color: white; font-size: 24px; pointer-events: none; z-index: 999;
+            background: rgba(0,0,0,0.8); padding: 20px; border-radius: 8px;
+        }
+
+        #controls-help { 
+            position: absolute; bottom: 20px; left: 20px; color: rgba(255,255,255,0.8); 
+            pointer-events: none; font-size: 14px; text-shadow: 1px 1px 2px black;
+        }
+
+        #error-log {
+            position: absolute; top: 0; left: 0; width: 100%; height: 50%; 
+            background: rgba(50, 0, 0, 0.8); color: #ffcccc; padding: 20px; 
+            display: none; z-index: 1000; overflow-y: scroll; font-family: monospace;
+        }
     </style>
 </head>
 <body>
-    <div id="loading">Generating World...</div>
+    <div id="loading">Generating World...<br><span style="font-size:12px; opacity:0.7">If stuck, check console (F12)</span></div>
+    <div id="error-log"></div>
     <div id="controls-help">
         WASD: Pitch/Roll | SHIFT: Throttle Up | CTRL: Throttle Down<br>
         +/-: Camera Distance | Plane flies physically.
     </div>
+
+    <script>
+        window.onerror = function(msg, url, line, col, error) {
+            const log = document.getElementById('error-log');
+            log.style.display = 'block';
+            log.innerHTML += `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small><br><br>`;
+            document.getElementById('loading').innerText = "ERROR DETECTED";
+            return false;
+        };
+    </script>
 
     <script type="importmap">
         {
@@ -30,14 +56,14 @@
     <script type="module">
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-        import { SimplexNoise } from 'simplex-noise';
+        import { createNoise2D } from 'simplex-noise';
         import GUI from 'lil-gui';
 
-        // --- CONFIGURATION & GLOBALS ---
+        // --- CONFIGURATION ---
         const CONFIG = {
             chunkSize: 1000,
-            resolution: 128, // Segments per chunk (Higher = better vertex displacement)
-            viewDistance: 2, // Radius of chunks to render (2 = 5x5 grid)
+            resolution: 128, 
+            viewDistance: 2,
             waterLevel: -10,
             colors: {
                 waterDeep: new THREE.Color(0x001e36),
@@ -50,27 +76,23 @@
             }
         };
 
-        const noise2D = new SimplexNoise();
+        // --- INIT NOISE ---
+        const noise2D = createNoise2D(); // Fixed: API changed in v4
+
+        // --- SCENE SETUP ---
         const scene = new THREE.Scene();
-        
-        // High Quality Renderer
         const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.0;
         document.body.appendChild(renderer.domElement);
 
         const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 8000);
-        
-        // Fog for atmosphere
         scene.fog = new THREE.FogExp2(0x87CEEB, 0.0008);
 
         // --- SHADERS ---
-
-        // 1. ADVANCED WATER SHADER
         const waterVertexShader = `
             uniform float uTime;
             uniform float uWaveSize;
@@ -79,19 +101,11 @@
             varying vec2 vUv;
             varying vec3 vPosition;
 
-            // Simple pseudo-random noise
-            float random(vec2 st) {
-                return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
-            }
-
-            // Value Noise
+            float random(vec2 st) { return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123); }
             float noise(vec2 st) {
-                vec2 i = floor(st);
-                vec2 f = fract(st);
-                float a = random(i);
-                float b = random(i + vec2(1.0, 0.0));
-                float c = random(i + vec2(0.0, 1.0));
-                float d = random(i + vec2(1.0, 1.0));
+                vec2 i = floor(st); vec2 f = fract(st);
+                float a = random(i); float b = random(i + vec2(1.0, 0.0));
+                float c = random(i + vec2(0.0, 1.0)); float d = random(i + vec2(1.0, 1.0));
                 vec2 u = f * f * (3.0 - 2.0 * f);
                 return mix(a, b, u.x) + (c - a)* u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
             }
@@ -99,17 +113,13 @@
             void main() {
                 vUv = uv;
                 vec3 pos = position;
-                
-                // Generated Waves (Sum of Sines + Noise)
                 float shift = uTime * uSpeed;
                 float wave1 = sin(pos.x * 0.02 + shift) * cos(pos.z * 0.02 + shift) * uWaveSize;
                 float wave2 = sin(pos.x * 0.05 - shift * 0.5) * uWaveSize * 0.5;
                 float noiseWave = noise(pos.xz * 0.05 + shift) * uWaveSize * 0.5;
-                
                 pos.y += wave1 + wave2 + noiseWave;
                 vElevation = pos.y;
                 vPosition = pos;
-
                 gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
             }
         `;
@@ -121,106 +131,16 @@
             uniform float uFoamThreshold;
             varying float vElevation;
             varying vec3 vPosition;
-
             void main() {
-                // Mix deep and shallow based on wave height
                 float mixStrength = smoothstep(-2.0, 3.0, vElevation);
                 vec3 color = mix(uColorDeep, uColorShallow, mixStrength);
-
-                // Procedural Foam on wave peaks
                 float foamMix = step(uFoamThreshold, vElevation);
-                color = mix(color, uColorFoam, foamMix * 0.8); // 0.8 opacity
-
-                // Simple opacity gradient
-                float alpha = 0.95; 
-
-                gl_FragColor = vec4(color, alpha);
-                
-                // Basic specular highlight approximation
-                // (Real PBR would require more complex setup, this mimics sun reflection)
-                // gl_FragColor.rgb += vec3(0.1) * max(0.0, vElevation); 
-                
+                color = mix(color, uColorFoam, foamMix * 0.8);
+                gl_FragColor = vec4(color, 0.95);
                 #include <tonemapping_fragment>
                 #include <colorspace_fragment>
             }
         `;
-
-        // 2. ADJUSTABLE GROUND SHADER
-        const groundVertexShader = `
-            varying vec2 vUv;
-            varying float vHeight;
-            varying vec3 vNormal;
-            varying vec3 vPos;
-
-            void main() {
-                vUv = uv;
-                vPos = (modelMatrix * vec4(position, 1.0)).xyz;
-                vHeight = position.y;
-                vNormal = normal;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            }
-        `;
-
-        const groundFragmentShader = `
-            uniform vec3 uColorSand;
-            uniform vec3 uColorGrass;
-            uniform vec3 uColorStone;
-            uniform vec3 uColorSnow;
-            
-            // Texture placeholders (passed as null if not used)
-            uniform sampler2D uTexSand;
-            uniform sampler2D uTexGrass;
-            uniform sampler2D uTexStone;
-            uniform sampler2D uTexSnow;
-            uniform bool uHasTexture;
-
-            varying float vHeight;
-            varying vec3 vPos;
-            varying vec3 vNormal;
-
-            void main() {
-                vec3 color = uColorSand;
-                
-                // Height based blending (Tri-planar blending logic simplified for height)
-                // Thresholds
-                float hSand = -5.0;
-                float hGrass = 5.0;
-                float hStone = 80.0;
-                float hSnow = 140.0;
-                
-                float blendRange = 15.0; // Soft blending
-
-                float wGrass = smoothstep(hSand, hSand + blendRange, vHeight);
-                float wStone = smoothstep(hGrass, hGrass + blendRange, vHeight);
-                float wSnow = smoothstep(hStone, hStone + blendRange, vHeight);
-                
-                // Slope calculation for rocks on steep hills
-                vec3 up = vec3(0.0, 1.0, 0.0);
-                float slope = 1.0 - dot(vNormal, up);
-                float slopeStone = smoothstep(0.4, 0.7, slope);
-
-                // Color Mixing
-                color = mix(color, uColorGrass, wGrass);
-                color = mix(color, uColorStone, wStone);
-                color = mix(color, uColorSnow, wSnow);
-                
-                // Apply steepness rock logic (Rock usually overrides grass/snow on cliffs)
-                color = mix(color, uColorStone, slopeStone);
-
-                // Basic directional lighting (simulated in shader for custom control or use Three.js lights)
-                // For this implementation we rely on Three'js StandardMaterial logic being bypassed, 
-                // so we need to multiply by light. 
-                // However, to keep "Receive Shadow" working with custom shaders, 
-                // it is usually easier to use MeshStandardMaterial + onBeforeCompile.
-                // But for pure ShaderMaterial control asked in prompt, we output basic color.
-                // To make it look "Maximum Graphics", we will assume the environment lighting adds depth
-                // or we fake some ambient occlusion based on slope.
-
-                gl_FragColor = vec4(color, 1.0);
-            }
-        `;
-
-        // --- MATERIALS ---
 
         const waterMaterial = new THREE.ShaderMaterial({
             vertexShader: waterVertexShader,
@@ -238,12 +158,9 @@
             side: THREE.DoubleSide
         });
 
-        // Use StandardMaterial for Ground to get Real Shadows, but modify with onBeforeCompile for Biomes
+        // --- GROUND MATERIAL (Standard + Injection) ---
         const groundMaterial = new THREE.MeshStandardMaterial({ 
-            roughness: 0.8, 
-            metalness: 0.1,
-            flatShading: false,
-            vertexColors: false
+            roughness: 0.9, metalness: 0.1, flatShading: false 
         });
         
         groundMaterial.onBeforeCompile = (shader) => {
@@ -252,82 +169,48 @@
             shader.uniforms.uColorStone = { value: CONFIG.colors.stone };
             shader.uniforms.uColorSnow = { value: CONFIG.colors.snow };
 
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <common>',
-                `#include <common>
-                varying float vHeight;
-                varying float vSlope;
-                `
+            shader.vertexShader = shader.vertexShader.replace('#include <common>',
+                `#include <common>\nvarying float vHeight;\nvarying float vSlope;`
             );
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <fog_vertex>',
-                `#include <fog_vertex>
-                vHeight = position.y;
-                // Simple slope approx in vertex shader
-                vec3 up = vec3(0.0, 1.0, 0.0);
-                vSlope = 1.0 - dot(normal, up);
-                `
+            shader.vertexShader = shader.vertexShader.replace('#include <fog_vertex>',
+                `#include <fog_vertex>\nvHeight = position.y;\nvec3 up = vec3(0.0, 1.0, 0.0);\nvSlope = 1.0 - dot(normal, up);`
             );
-
-            shader.fragmentShader = shader.fragmentShader.replace(
-                '#include <common>',
-                `#include <common>
-                uniform vec3 uColorSand;
-                uniform vec3 uColorGrass;
-                uniform vec3 uColorStone;
-                uniform vec3 uColorSnow;
-                varying float vHeight;
-                varying float vSlope;
-                `
+            shader.fragmentShader = shader.fragmentShader.replace('#include <common>',
+                `#include <common>\nuniform vec3 uColorSand;\nuniform vec3 uColorGrass;\nuniform vec3 uColorStone;\nuniform vec3 uColorSnow;\nvarying float vHeight;\nvarying float vSlope;`
             );
-            shader.fragmentShader = shader.fragmentShader.replace(
-                '#include <map_fragment>',
+            shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>',
                 `
-                // Procedural Biome Logic injected into Standard Material
                 vec3 gColor = uColorSand;
-                
                 float wGrass = smoothstep(-5.0, 5.0, vHeight);
                 float wStone = smoothstep(30.0, 60.0, vHeight);
                 float wSnow = smoothstep(110.0, 140.0, vHeight);
                 float slopeMix = smoothstep(0.35, 0.6, vSlope);
-
                 gColor = mix(gColor, uColorGrass, wGrass);
                 gColor = mix(gColor, uColorStone, wStone);
                 gColor = mix(gColor, uColorSnow, wSnow);
-                gColor = mix(gColor, uColorStone, slopeMix); // Cliffs are stone
-
+                gColor = mix(gColor, uColorStone, slopeMix);
                 diffuseColor *= vec4(gColor, 1.0);
                 `
             );
         };
 
-        // --- WORLD GENERATION (NOISE & CHUNKS) ---
-
-        // Configurable Noise Settings
+        // --- GENERATION ---
         const NOISE_SETTINGS = {
-            scale: 0.003,
-            octaves: 6,
-            persistence: 0.5,
-            lacunarity: 2.0,
-            exponent: 1.2, // To flatten valleys and steepen peaks
-            heightMultiplier: 180
+            scale: 0.003, octaves: 6, persistence: 0.5, lacunarity: 2.0, exponent: 1.2, heightMultiplier: 180
         };
 
         function getTerrainHeight(x, z) {
             let amplitude = 1;
             let frequency = NOISE_SETTINGS.scale;
             let noiseHeight = 0;
-
             for (let i = 0; i < NOISE_SETTINGS.octaves; i++) {
-                let n = noise2D.noise(x * frequency, z * frequency);
+                // Fixed: usage of createNoise2D
+                let n = noise2D(x * frequency, z * frequency); 
                 noiseHeight += n * amplitude;
                 amplitude *= NOISE_SETTINGS.persistence;
                 frequency *= NOISE_SETTINGS.lacunarity;
             }
-
-            // Normalize slightly and apply exponent for terrain shape
-            noiseHeight = Math.pow(Math.abs(noiseHeight), NOISE_SETTINGS.exponent) * Math.sign(noiseHeight);
-            return noiseHeight * NOISE_SETTINGS.heightMultiplier;
+            return Math.pow(Math.abs(noiseHeight), NOISE_SETTINGS.exponent) * Math.sign(noiseHeight) * NOISE_SETTINGS.heightMultiplier;
         }
 
         class ChunkManager {
@@ -335,52 +218,39 @@
                 this.chunks = {};
                 this.loadedModels = { tree: null, rock: null };
                 this.loadModels();
-                this.raycaster = new THREE.Raycaster();
             }
 
             loadModels() {
                 const loader = new GLTFLoader();
-                const loadModel = (path, type, fallbackColor) => {
+                const load = (path, type, col) => {
                     loader.load(path, (gltf) => {
-                        gltf.scene.traverse(c => { if(c.isMesh) { c.castShadow = true; c.receiveShadow = true; }});
+                        gltf.scene.traverse(c => { if(c.isMesh) { c.castShadow=true; c.receiveShadow=true; }});
                         this.loadedModels[type] = gltf.scene;
-                        console.log(`Loaded ${type}`);
                     }, undefined, (err) => {
-                        // Fallback Mesh
-                        const geo = new THREE.BoxGeometry(2, type === 'tree' ? 8 : 2, 2);
-                        const mat = new THREE.MeshStandardMaterial({ color: fallbackColor });
-                        const mesh = new THREE.Mesh(geo, mat);
-                        mesh.castShadow = true; mesh.receiveShadow = true;
-                        this.loadedModels[type] = mesh;
+                        console.warn(`Model ${path} not found, using cube.`);
+                        const m = new THREE.Mesh(new THREE.BoxGeometry(2, type=='tree'?8:2, 2), new THREE.MeshStandardMaterial({color:col}));
+                        m.castShadow=true; m.receiveShadow=true;
+                        this.loadedModels[type] = m;
                     });
                 };
-
-                loadModel('/mallit/tree.glb', 'tree', 0x2d5a27);
-                loadModel('/mallit/rock.glb', 'rock', 0x888888);
+                load('/mallit/tree.glb', 'tree', 0x2d5a27);
+                load('/mallit/rock.glb', 'rock', 0x888888);
             }
 
-            update(playerPos) {
-                const pX = Math.floor(playerPos.x / CONFIG.chunkSize);
-                const pZ = Math.floor(playerPos.z / CONFIG.chunkSize);
-
-                const visibleKeys = new Set();
+            update(pos) {
+                const cx = Math.floor(pos.x / CONFIG.chunkSize);
+                const cz = Math.floor(pos.z / CONFIG.chunkSize);
+                const keys = new Set();
 
                 for (let x = -CONFIG.viewDistance; x <= CONFIG.viewDistance; x++) {
                     for (let z = -CONFIG.viewDistance; z <= CONFIG.viewDistance; z++) {
-                        const cx = pX + x;
-                        const cz = pZ + z;
-                        const key = `${cx},${cz}`;
-                        visibleKeys.add(key);
-
-                        if (!this.chunks[key]) {
-                            this.createChunk(cx, cz);
-                        }
+                        const key = `${cx+x},${cz+z}`;
+                        keys.add(key);
+                        if (!this.chunks[key]) this.createChunk(cx+x, cz+z);
                     }
                 }
-
-                // Cleanup old chunks
                 for (const key in this.chunks) {
-                    if (!visibleKeys.has(key)) {
+                    if (!keys.has(key)) {
                         scene.remove(this.chunks[key].mesh);
                         scene.remove(this.chunks[key].water);
                         scene.remove(this.chunks[key].objects);
@@ -392,350 +262,160 @@
 
             createChunk(cx, cz) {
                 const size = CONFIG.chunkSize;
-                const segments = CONFIG.resolution;
-                const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
-                geometry.rotateX(-Math.PI / 2);
-
-                const positions = geometry.attributes.position.array;
+                const segs = CONFIG.resolution;
+                const geo = new THREE.PlaneGeometry(size, size, segs, segs);
+                geo.rotateX(-Math.PI/2);
                 
-                // Displace Ground
-                for (let i = 0; i < positions.length; i += 3) {
-                    const vx = positions[i] + cx * size;
-                    const vz = positions[i + 2] + cz * size;
-                    positions[i + 1] = getTerrainHeight(vx, vz);
+                const pos = geo.attributes.position.array;
+                for(let i=0; i<pos.length; i+=3) {
+                    pos[i+1] = getTerrainHeight(pos[i]+cx*size, pos[i+2]+cz*size);
                 }
-                
-                geometry.computeVertexNormals();
+                geo.computeVertexNormals();
 
-                // Ground Mesh
-                const mesh = new THREE.Mesh(geometry, groundMaterial);
-                mesh.position.set(cx * size, 0, cz * size);
-                mesh.receiveShadow = true;
-                mesh.castShadow = true;
+                const mesh = new THREE.Mesh(geo, groundMaterial);
+                mesh.position.set(cx*size, 0, cz*size);
+                mesh.castShadow = true; mesh.receiveShadow = true;
                 scene.add(mesh);
 
-                // Water Mesh
-                const waterGeo = new THREE.PlaneGeometry(size, size, segments / 2, segments / 2);
-                waterGeo.rotateX(-Math.PI / 2);
-                const water = new THREE.Mesh(waterGeo, waterMaterial);
-                water.position.set(cx * size, CONFIG.waterLevel, cz * size);
+                const water = new THREE.Mesh(new THREE.PlaneGeometry(size,size,segs/4,segs/4).rotateX(-Math.PI/2), waterMaterial);
+                water.position.set(cx*size, CONFIG.waterLevel, cz*size);
                 scene.add(water);
 
-                // Object Placement (Raycaster/Height Logic)
-                const objectsGroup = new THREE.Group();
-                objectsGroup.position.set(cx * size, 0, cz * size);
-                this.placeObjects(objectsGroup, cx, cz);
-                scene.add(objectsGroup);
+                const objGroup = new THREE.Group();
+                objGroup.position.set(cx*size, 0, cz*size);
+                this.placeObjects(objGroup, cx, cz);
+                scene.add(objGroup);
 
-                this.chunks[`${cx},${cz}`] = { mesh, water, geometry, objects: objectsGroup };
+                this.chunks[`${cx},${cz}`] = { mesh, water, geometry: geo, objects: objGroup };
             }
 
             placeObjects(group, cx, cz) {
-                if (!this.loadedModels.tree || !this.loadedModels.rock) return;
-
-                const count = 10; // Objects per chunk
-                for (let i = 0; i < count; i++) {
-                    const lx = (Math.random() - 0.5) * CONFIG.chunkSize;
-                    const lz = (Math.random() - 0.5) * CONFIG.chunkSize;
-                    const wx = lx + cx * CONFIG.chunkSize;
-                    const wz = lz + cz * CONFIG.chunkSize;
-
-                    const h = getTerrainHeight(wx, wz);
-
-                    // Logic: Trees on grass, Rocks anywhere but mostly steep or high
-                    // Simple logic: Trees between height 0 and 60. Rocks anywhere.
+                if(!this.loadedModels.tree || !this.loadedModels.rock) return;
+                for(let i=0; i<10; i++) {
+                    const lx = (Math.random()-0.5)*CONFIG.chunkSize;
+                    const lz = (Math.random()-0.5)*CONFIG.chunkSize;
+                    const h = getTerrainHeight(lx+cx*CONFIG.chunkSize, lz+cz*CONFIG.chunkSize);
                     
-                    let model = null;
-                    let scale = 1;
-
-                    if (h > 0 && h < 50 && Math.random() > 0.3) {
-                        model = this.loadedModels.tree.clone();
-                        scale = 3 + Math.random() * 3;
-                    } else if (h > -10 && Math.random() > 0.5) {
-                        model = this.loadedModels.rock.clone();
-                        scale = 2 + Math.random() * 5;
-                    }
-
-                    if (model && h > CONFIG.waterLevel) {
-                        model.position.set(lx, h, lz);
-                        model.scale.set(scale, scale, scale);
-                        model.rotation.y = Math.random() * Math.PI * 2;
-                        group.add(model);
+                    let m = null, s = 1;
+                    if(h>0 && h<50 && Math.random()>0.3) { m = this.loadedModels.tree.clone(); s = 3+Math.random()*3; }
+                    else if(h>-10 && Math.random()>0.5) { m = this.loadedModels.rock.clone(); s = 2+Math.random()*5; }
+                    
+                    if(m && h>CONFIG.waterLevel) {
+                        m.position.set(lx, h, lz);
+                        m.scale.set(s,s,s);
+                        m.rotation.y = Math.random()*6.28;
+                        group.add(m);
                     }
                 }
             }
         }
 
-        // --- PLANE & PHYSICS ---
-
+        // --- PLANE ---
         class Plane {
             constructor() {
-                // Geometry
-                const geometry = new THREE.ConeGeometry(1, 4, 32);
-                geometry.rotateX(Math.PI / 2);
-                const material = new THREE.MeshStandardMaterial({ color: 0xff0000, metalness: 0.8, roughness: 0.2 });
-                this.mesh = new THREE.Mesh(geometry, material);
+                const geo = new THREE.ConeGeometry(1, 4, 32);
+                geo.rotateX(Math.PI/2);
+                this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({color:0xff0000}));
                 this.mesh.castShadow = true;
                 scene.add(this.mesh);
-
-                // Physics state
-                this.position = new THREE.Vector3(0, 150, 0);
-                this.velocity = new THREE.Vector3(0, 0, 50); // Initial speed
-                this.quaternion = new THREE.Quaternion();
-                this.speed = 50;
-                this.throttle = 0.5; // 0 to 1
-                
-                // Camera config
+                this.pos = new THREE.Vector3(0, 150, 0);
+                this.vel = new THREE.Vector3(0,0,50);
+                this.quat = new THREE.Quaternion();
+                this.speed = 50; this.throttle = 0.5;
+                this.input = {w:0,a:0,s:0,d:0,sh:0,ct:0};
                 this.camDist = 30;
-                this.camHeight = 10;
-                
-                // Input State
-                this.input = { w: false, a: false, s: false, d: false, shift: false, ctrl: false };
-
-                // Apply initial rotation
-                this.mesh.position.copy(this.position);
-                
-                // Helper vectors
-                this.forward = new THREE.Vector3();
-                this.up = new THREE.Vector3(0,1,0);
-                this.dummy = new THREE.Object3D();
             }
-
             update(dt) {
-                // 1. Handle Throttle
-                if (this.input.shift) this.throttle = Math.min(this.throttle + dt * 0.5, 1.0);
-                if (this.input.ctrl) this.throttle = Math.max(this.throttle - dt * 0.5, 0.0);
-
-                // 2. Physics Model (Simplified Aerodynamics)
-                // Thrust
-                const maxSpeed = 150;
-                const minSpeed = 30;
-                const targetSpeed = minSpeed + this.throttle * (maxSpeed - minSpeed);
+                if(this.input.sh) this.throttle = Math.min(this.throttle+dt*0.5, 1);
+                if(this.input.ct) this.throttle = Math.max(this.throttle-dt*0.5, 0);
                 
-                // Drag / Acceleration
-                this.speed += (targetSpeed - this.speed) * dt * 0.5;
+                this.speed += ((30 + this.throttle*120) - this.speed) * dt * 0.5;
+                
+                const lx = new THREE.Vector3(1,0,0).applyQuaternion(this.quat);
+                const ly = new THREE.Vector3(0,1,0).applyQuaternion(this.quat);
+                const lz = new THREE.Vector3(0,0,1).applyQuaternion(this.quat);
+                
+                if(this.input.w) this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(lx, dt));
+                if(this.input.s) this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(lx, -dt));
+                if(this.input.a) { this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(lz, dt*1.5)); this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(ly, dt*0.5)); }
+                if(this.input.d) { this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(lz, -dt*1.5)); this.quat.multiply(new THREE.Quaternion().setFromAxisAngle(ly, -dt*0.5)); }
 
-                // Rotations based on WASD
-                const pitchSpeed = 1.0;
-                const rollSpeed = 1.5;
-                const yawSpeed = 0.5;
+                this.mesh.quaternion.copy(this.quat);
+                const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(this.quat).normalize();
+                this.pos.add(fwd.multiplyScalar(this.speed*dt));
+                
+                const gh = getTerrainHeight(this.pos.x, this.pos.z);
+                if(this.pos.y < gh+2) this.pos.y = gh+2;
+                
+                this.mesh.position.copy(this.pos);
 
-                // Current local rotation axes
-                const localX = new THREE.Vector3(1, 0, 0).applyQuaternion(this.quaternion);
-                const localY = new THREE.Vector3(0, 1, 0).applyQuaternion(this.quaternion);
-                const localZ = new THREE.Vector3(0, 0, 1).applyQuaternion(this.quaternion);
-
-                // Inputs
-                if (this.input.w) this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, pitchSpeed * dt));
-                if (this.input.s) this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, -pitchSpeed * dt));
-                if (this.input.a) {
-                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localZ, rollSpeed * dt)); // Roll
-                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localY, yawSpeed * dt));  // Mild Yaw
-                }
-                if (this.input.d) {
-                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localZ, -rollSpeed * dt));
-                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localY, -yawSpeed * dt));
-                }
-
-                // Gravity effect (pull nose down if speed is low)
-                // const gravityTilt = (1.0 - this.throttle) * dt * 0.2;
-                // this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, gravityTilt));
-
-                // Auto-leveling (very subtle)
-                // ... skipped for "Real Physics" feel request, makes it harder to fly but more realistic
-
-                this.mesh.quaternion.copy(this.quaternion);
-
-                // Calculate Forward Vector
-                this.forward.set(0, 0, -1).applyQuaternion(this.quaternion).normalize();
-
-                // Move
-                this.velocity.copy(this.forward).multiplyScalar(this.speed);
-                this.position.addScaledVector(this.velocity, dt);
-
-                // Collision with ground (basic)
-                const groundH = getTerrainHeight(this.position.x, this.position.z);
-                if (this.position.y < groundH + 2) {
-                    this.position.y = groundH + 2;
-                    // Crash logic could go here
-                }
-
-                this.mesh.position.copy(this.position);
-
-                // Camera Follow
-                this.updateCamera(dt);
-            }
-
-            updateCamera(dt) {
-                // Ideal position behind plane
-                const offset = new THREE.Vector3(0, this.camHeight, this.camDist);
-                offset.applyQuaternion(this.quaternion);
-                const targetPos = this.position.clone().add(offset);
-                const targetLook = this.position.clone().add(this.forward.clone().multiplyScalar(20));
-
-                // Lerp for smooth follow
-                camera.position.lerp(targetPos, dt * 5);
-                camera.lookAt(targetLook);
+                // Camera
+                const off = new THREE.Vector3(0, 10, this.camDist).applyQuaternion(this.quat);
+                camera.position.lerp(this.pos.clone().add(off), dt*5);
+                camera.lookAt(this.pos.clone().add(fwd.multiplyScalar(20)));
             }
         }
 
-        // --- SKY & ENVIRONMENT SYSTEM ---
-
-        class SkySystem {
+        // --- SKY ---
+        class Sky {
             constructor() {
-                // Sun Light
-                this.sunLight = new THREE.DirectionalLight(0xffffff, 2.0);
-                this.sunLight.castShadow = true;
-                this.sunLight.shadow.mapSize.width = 2048;
-                this.sunLight.shadow.mapSize.height = 2048;
-                this.sunLight.shadow.camera.near = 0.5;
-                this.sunLight.shadow.camera.far = 500;
-                this.sunLight.shadow.camera.left = -200;
-                this.sunLight.shadow.camera.right = 200;
-                this.sunLight.shadow.camera.top = 200;
-                this.sunLight.shadow.camera.bottom = -200;
-                scene.add(this.sunLight);
-
-                // Ambient
-                this.ambientLight = new THREE.HemisphereLight(0x87CEEB, 0x333333, 0.5);
-                scene.add(this.ambientLight);
-
-                // Starfield
-                const starGeo = new THREE.BufferGeometry();
-                const starCount = 2000;
-                const starPos = new Float32Array(starCount * 3);
-                for(let i=0; i<starCount*3; i++) starPos[i] = (Math.random()-0.5)*4000;
-                starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-                this.stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0xffffff, size: 2, transparent: true, opacity: 0}));
-                scene.add(this.stars);
-
-                // Cycle
+                this.sun = new THREE.DirectionalLight(0xffffff, 2);
+                this.sun.castShadow = true;
+                this.sun.shadow.camera.far = 1000;
+                this.sun.shadow.mapSize.set(2048,2048);
+                scene.add(this.sun);
+                scene.add(new THREE.HemisphereLight(0x87CEEB, 0x333333, 0.5));
                 this.time = 0;
-                this.dayDuration = 60; // seconds for full day
-                this.speed = 0.5; // Multiplier
             }
-
-            update(dt, playerPos) {
-                this.time += dt * this.speed;
-                const cycle = (this.time % this.dayDuration) / this.dayDuration; // 0 to 1
-                const angle = cycle * Math.PI * 2;
-
-                // Move Sun
-                const sunDist = 500;
-                this.sunLight.position.set(
-                    playerPos.x + Math.sin(angle) * sunDist,
-                    Math.sin(angle + Math.PI/2) * sunDist, // Rise/Set logic
-                    playerPos.z + Math.cos(angle) * sunDist
-                );
-
-                this.sunLight.target.position.copy(playerPos);
-                this.sunLight.target.updateMatrixWorld();
-
-                // Colors based on cycle (Day/Night)
-                const sunHeight = Math.sin(angle + Math.PI/2);
+            update(dt, pPos) {
+                this.time += dt * 0.5;
+                const angle = (this.time % 60) / 60 * Math.PI * 2;
+                this.sun.position.set(pPos.x + Math.sin(angle)*500, Math.sin(angle+1.57)*500, pPos.z + Math.cos(angle)*500);
+                this.sun.target.position.copy(pPos);
+                this.sun.target.updateMatrixWorld();
                 
-                let skyColor, fogColor, lightIntensity;
-
-                if (sunHeight > 0.1) {
-                    // Day
-                    skyColor = new THREE.Color(0x87CEEB);
-                    fogColor = new THREE.Color(0x87CEEB);
-                    lightIntensity = 2.0;
-                    this.stars.material.opacity = 0;
-                } else if (sunHeight < -0.1) {
-                    // Night
-                    skyColor = new THREE.Color(0x000011);
-                    fogColor = new THREE.Color(0x000511);
-                    lightIntensity = 0.0; // Moonlight handled by hemisphere
-                    this.stars.material.opacity = 1;
-                    this.stars.position.copy(playerPos); // Stars follow to seem infinite
-                } else {
-                    // Sunset / Sunrise
-                    skyColor = new THREE.Color(0xff9900);
-                    fogColor = new THREE.Color(0xffaa33);
-                    lightIntensity = 1.0;
-                    this.stars.material.opacity = 0.5;
-                }
-
-                // Lerp colors for smoothness
-                scene.background = skyColor;
-                scene.fog.color.lerp(fogColor, dt);
-                this.sunLight.intensity = THREE.MathUtils.lerp(this.sunLight.intensity, lightIntensity, dt);
+                const h = Math.sin(angle+1.57);
+                const col = h > 0 ? new THREE.Color(0x87CEEB) : new THREE.Color(0x000011);
+                scene.background = col;
+                scene.fog.color.lerp(col, dt);
             }
         }
 
-        // --- MAIN INITIALIZATION ---
-
+        // --- MAIN LOOP ---
         const chunkManager = new ChunkManager();
         const plane = new Plane();
-        const skySystem = new SkySystem();
+        const sky = new Sky();
         const clock = new THREE.Clock();
 
-        // Inputs
-        window.addEventListener('keydown', (e) => {
-            if(e.key === 'w') plane.input.w = true;
-            if(e.key === 's') plane.input.s = true;
-            if(e.key === 'a') plane.input.a = true;
-            if(e.key === 'd') plane.input.d = true;
-            if(e.key === 'Shift') plane.input.shift = true;
-            if(e.key === 'Control') plane.input.ctrl = true;
-            if(e.key === '+') plane.camDist = Math.max(10, plane.camDist - 2);
-            if(e.key === '-') plane.camDist = Math.min(100, plane.camDist + 2);
+        window.addEventListener('keydown', e => {
+            if(e.key=='w') plane.input.w=1; if(e.key=='s') plane.input.s=1;
+            if(e.key=='a') plane.input.a=1; if(e.key=='d') plane.input.d=1;
+            if(e.key=='Shift') plane.input.sh=1; if(e.key=='Control') plane.input.ct=1;
+            if(e.key=='+') plane.camDist-=2; if(e.key=='-') plane.camDist+=2;
+        });
+        window.addEventListener('keyup', e => {
+            if(e.key=='w') plane.input.w=0; if(e.key=='s') plane.input.s=0;
+            if(e.key=='a') plane.input.a=0; if(e.key=='d') plane.input.d=0;
+            if(e.key=='Shift') plane.input.sh=0; if(e.key=='Control') plane.input.ct=0;
         });
 
-        window.addEventListener('keyup', (e) => {
-            if(e.key === 'w') plane.input.w = false;
-            if(e.key === 's') plane.input.s = false;
-            if(e.key === 'a') plane.input.a = false;
-            if(e.key === 'd') plane.input.d = false;
-            if(e.key === 'Shift') plane.input.shift = false;
-            if(e.key === 'Control') plane.input.ctrl = false;
-        });
+        const gui = new GUI({ title: 'Settings' });
+        gui.add(waterMaterial.uniforms.uWaveSize, 'value', 0, 10).name('Wave Size');
+        gui.addColor(CONFIG.colors, 'sand').name('Sand Color').onChange(() => chunkManager.chunks={});
 
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-
-        // GUI Setup
-        const gui = new GUI({ title: 'World Settings' });
-        
-        const folderWater = gui.addFolder('Water Shader');
-        folderWater.add(waterMaterial.uniforms.uWaveSize, 'value', 0, 10).name('Wave Size');
-        folderWater.add(waterMaterial.uniforms.uSpeed, 'value', 0, 5).name('Wave Speed');
-        folderWater.add(waterMaterial.uniforms.uFoamThreshold, 'value', 0, 5).name('Foam Thresh');
-        folderWater.addColor({c: CONFIG.colors.waterDeep.getHex()}, 'c').name('Deep Color').onChange(v => waterMaterial.uniforms.uColorDeep.value.set(v));
-        folderWater.addColor({c: CONFIG.colors.waterShallow.getHex()}, 'c').name('Shallow Color').onChange(v => waterMaterial.uniforms.uColorShallow.value.set(v));
-
-        const folderGround = gui.addFolder('Ground Generation');
-        folderGround.add(NOISE_SETTINGS, 'scale', 0.001, 0.01).name('Noise Scale').onChange(()=>alert("Refresh to apply terrain scale changes"));
-        folderGround.addColor({c: CONFIG.colors.sand.getHex()}, 'c').name('Sand').onChange(v => { CONFIG.colors.sand.set(v); chunkManager.chunks = {}; }); // Trigger rebuild roughly
-        
-        const folderSky = gui.addFolder('Sky & Time');
-        folderSky.add(skySystem, 'speed', 0, 5).name('Day Cycle Speed');
-
-        // Animation Loop
-        document.getElementById('loading').style.display = 'none';
-
+        let loaded = false;
         function animate() {
             requestAnimationFrame(animate);
-
+            if(!loaded) { document.getElementById('loading').style.display='none'; loaded=true; }
+            
             const dt = clock.getDelta();
-            
-            // Updates
             plane.update(dt);
-            skySystem.update(dt, plane.position);
-            chunkManager.update(plane.position);
-            
-            // Shader Updates
+            sky.update(dt, plane.pos);
+            chunkManager.update(plane.pos);
             waterMaterial.uniforms.uTime.value += dt;
-
             renderer.render(scene, camera);
         }
-
         animate();
-
     </script>
 </body>
 </html>
