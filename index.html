@@ -1,271 +1,741 @@
 <!DOCTYPE html>
-<html lang="fi">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Three.js RPG - Fixed UI & Shaders</title>
+    <title>High-Fidelity Endless Flight Generator</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
-        #ui {
-            position: absolute; top: 15px; left: 15px; color: white; pointer-events: none;
-            background: rgba(0,0,0,0.8); padding: 15px; border-radius: 12px; border: 1px solid #444;
-            z-index: 10;
-        }
-        .bar-container { width: 220px; height: 16px; background: #222; border: 1px solid #777; margin: 6px 0; border-radius: 8px; overflow: hidden; }
-        #hp-bar { width: 100%; height: 100%; background: linear-gradient(90deg, #ff4444, #aa0000); transition: 0.3s; }
-        #xp-bar { width: 0%; height: 100%; background: linear-gradient(90deg, #44ccff, #0066ff); transition: 0.3s; }
-        #blocker {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85); display: flex; align-items: center;
-            justify-content: center; color: white; font-size: 24px; cursor: pointer; z-index: 1000;
-        }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Helvetica', sans-serif; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; pointer-events: none; }
+        #controls-help { position: absolute; bottom: 20px; left: 20px; color: rgba(255,255,255,0.7); pointer-events: none; }
     </style>
 </head>
 <body>
-    <div id="ui">
-        <b>LEVEL <span id="lvl-txt">1</span></b>
-        <div class="bar-container"><div id="hp-bar"></div></div>
-        <div class="bar-container"><div id="xp-bar"></div></div>
-        <div id="stats" style="font-size: 12px; color: #0f0;">Stats: Loading...</div>
+    <div id="loading">Generating World...</div>
+    <div id="controls-help">
+        WASD: Pitch/Roll | SHIFT: Throttle Up | CTRL: Throttle Down<br>
+        +/-: Camera Distance | Plane flies physically.
     </div>
-    <div id="blocker">KLIKKAA ALOITTAAKSESI</div>
 
     <script type="importmap">
         {
             "imports": {
                 "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
                 "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-                "simplex-noise": "https://unpkg.com/simplex-noise@4.0.1/dist/esm/simplex-noise.js"
+                "simplex-noise": "https://unpkg.com/simplex-noise@4.0.1/dist/esm/simplex-noise.js",
+                "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.min.js"
             }
         }
     </script>
 
     <script type="module">
         import * as THREE from 'three';
-        import { createNoise2D } from 'simplex-noise';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-        import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+        import { SimplexNoise } from 'simplex-noise';
+        import GUI from 'lil-gui';
 
-        // --- KONFIGURAATIO ---
+        // --- CONFIGURATION & GLOBALS ---
         const CONFIG = {
-            CHUNK_SIZE: 60,
-            WATER_LEVEL: -2.5,
-            PLAYER_HEIGHT: 1.1,
-            PROP_FILES: ['tree.glb', 'rock.glb', 'flower.glb'],
-            ENEMY_MODEL_URL: './enemies/enemy1.glb'
+            chunkSize: 1000,
+            resolution: 128, // Segments per chunk (Higher = better vertex displacement)
+            viewDistance: 2, // Radius of chunks to render (2 = 5x5 grid)
+            waterLevel: -10,
+            colors: {
+                waterDeep: new THREE.Color(0x001e36),
+                waterShallow: new THREE.Color(0x006994),
+                foam: new THREE.Color(0xffffff),
+                sand: new THREE.Color(0xe6c288),
+                grass: new THREE.Color(0x2d5a27),
+                stone: new THREE.Color(0x5a5a5a),
+                snow: new THREE.Color(0xffffff),
+            }
         };
 
-        const PLAYER = { hp: 100, maxHp: 100, level: 1, xp: 0, nextLvl: 100, baseDmg: 45, speed: 15, jump: 23 };
-
+        const noise2D = new SimplexNoise();
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x87CEEB);
-        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        
+        // High Quality Renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
         renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
         document.body.appendChild(renderer.domElement);
 
-        // --- POINTER LOCK FIX ---
-        const controls = new PointerLockControls(camera, document.body);
-        const blocker = document.getElementById('blocker');
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 8000);
+        
+        // Fog for atmosphere
+        scene.fog = new THREE.FogExp2(0x87CEEB, 0.0008);
 
-        blocker.addEventListener('click', () => controls.lock());
-        controls.addEventListener('lock', () => blocker.style.display = 'none');
-        controls.addEventListener('unlock', () => blocker.style.display = 'flex');
+        // --- SHADERS ---
 
-        const loader = new GLTFLoader();
-        const noise2D = createNoise2D();
-        const chunks = new Map();
-        const enemies = [], loadedProps = [];
-        let enemyData = null;
+        // 1. ADVANCED WATER SHADER
+        const waterVertexShader = `
+            uniform float uTime;
+            uniform float uWaveSize;
+            uniform float uSpeed;
+            varying float vElevation;
+            varying vec2 vUv;
+            varying vec3 vPosition;
 
-        // --- VALO ---
-        const sun = new THREE.DirectionalLight(0xffffff, 1.2);
-        sun.position.set(50, 100, 50);
-        sun.castShadow = true;
-        scene.add(sun);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-
-        // --- WATER SHADER ---
-        const waterMaterial = new THREE.MeshStandardMaterial({ color: 0x00aaff, transparent: true, opacity: 0.7 });
-        waterMaterial.onBeforeCompile = (shader) => {
-            shader.uniforms.time = { value: 0 };
-            shader.vertexShader = `uniform float time;\n` + shader.vertexShader;
-            shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
-                vec3 transformed = vec3(position);
-                transformed.y += sin(transformed.x * 0.5 + time) * 0.15 + cos(transformed.z * 0.5 + time) * 0.15;
-            `);
-            waterMaterial.userData.shader = shader;
-        };
-
-        // --- LATAUKSET ---
-        loader.load(CONFIG.ENEMY_MODEL_URL, (gltf) => { enemyData = gltf; });
-        CONFIG.PROP_FILES.forEach(f => loader.load(`./mallit/${f}`, (g) => loadedProps.push(g.scene)));
-
-        function getHeight(x, z) {
-            return noise2D(x * 0.012, z * 0.012) * 12 + noise2D(x * 0.05, z * 0.05) * 2;
-        }
-
-        function createChunk(cX, cZ) {
-            const group = new THREE.Group();
-            const geo = new THREE.PlaneGeometry(60, 60, 50, 50);
-            geo.rotateX(-Math.PI/2);
-            const pos = geo.attributes.position;
-            const colors = new Float32Array(pos.count * 3);
-
-            for(let i=0; i<pos.count; i++) {
-                const px = pos.getX(i) + cX*60, pz = pos.getZ(i) + cZ*60;
-                const h = getHeight(px, pz);
-                pos.setY(i, h);
-                let col = new THREE.Color(h < -1.5 ? 0xdecbb7 : h > 7 ? 0x777777 : 0x448833);
-                col.toArray(colors, i*3);
+            // Simple pseudo-random noise
+            float random(vec2 st) {
+                return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
             }
-            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-            geo.computeVertexNormals();
+
+            // Value Noise
+            float noise(vec2 st) {
+                vec2 i = floor(st);
+                vec2 f = fract(st);
+                float a = random(i);
+                float b = random(i + vec2(1.0, 0.0));
+                float c = random(i + vec2(0.0, 1.0));
+                float d = random(i + vec2(1.0, 1.0));
+                vec2 u = f * f * (3.0 - 2.0 * f);
+                return mix(a, b, u.x) + (c - a)* u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+            }
+
+            void main() {
+                vUv = uv;
+                vec3 pos = position;
+                
+                // Generated Waves (Sum of Sines + Noise)
+                float shift = uTime * uSpeed;
+                float wave1 = sin(pos.x * 0.02 + shift) * cos(pos.z * 0.02 + shift) * uWaveSize;
+                float wave2 = sin(pos.x * 0.05 - shift * 0.5) * uWaveSize * 0.5;
+                float noiseWave = noise(pos.xz * 0.05 + shift) * uWaveSize * 0.5;
+                
+                pos.y += wave1 + wave2 + noiseWave;
+                vElevation = pos.y;
+                vPosition = pos;
+
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            }
+        `;
+
+        const waterFragmentShader = `
+            uniform vec3 uColorDeep;
+            uniform vec3 uColorShallow;
+            uniform vec3 uColorFoam;
+            uniform float uFoamThreshold;
+            varying float vElevation;
+            varying vec3 vPosition;
+
+            void main() {
+                // Mix deep and shallow based on wave height
+                float mixStrength = smoothstep(-2.0, 3.0, vElevation);
+                vec3 color = mix(uColorDeep, uColorShallow, mixStrength);
+
+                // Procedural Foam on wave peaks
+                float foamMix = step(uFoamThreshold, vElevation);
+                color = mix(color, uColorFoam, foamMix * 0.8); // 0.8 opacity
+
+                // Simple opacity gradient
+                float alpha = 0.95; 
+
+                gl_FragColor = vec4(color, alpha);
+                
+                // Basic specular highlight approximation
+                // (Real PBR would require more complex setup, this mimics sun reflection)
+                // gl_FragColor.rgb += vec3(0.1) * max(0.0, vElevation); 
+                
+                #include <tonemapping_fragment>
+                #include <colorspace_fragment>
+            }
+        `;
+
+        // 2. ADJUSTABLE GROUND SHADER
+        const groundVertexShader = `
+            varying vec2 vUv;
+            varying float vHeight;
+            varying vec3 vNormal;
+            varying vec3 vPos;
+
+            void main() {
+                vUv = uv;
+                vPos = (modelMatrix * vec4(position, 1.0)).xyz;
+                vHeight = position.y;
+                vNormal = normal;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        const groundFragmentShader = `
+            uniform vec3 uColorSand;
+            uniform vec3 uColorGrass;
+            uniform vec3 uColorStone;
+            uniform vec3 uColorSnow;
             
-            const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true }));
-            ground.receiveShadow = true;
-            group.add(ground);
+            // Texture placeholders (passed as null if not used)
+            uniform sampler2D uTexSand;
+            uniform sampler2D uTexGrass;
+            uniform sampler2D uTexStone;
+            uniform sampler2D uTexSnow;
+            uniform bool uHasTexture;
 
-            const water = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), waterMaterial);
-            water.rotation.x = -Math.PI/2; water.position.y = CONFIG.WATER_LEVEL;
-            group.add(water);
+            varying float vHeight;
+            varying vec3 vPos;
+            varying vec3 vNormal;
 
-            // Propsit Raycasterilla
-            const ray = new THREE.Raycaster();
-            for(let i=0; i<8; i++) {
-                const rx = (Math.random()-0.5)*50, rz = (Math.random()-0.5)*50;
-                ray.set(new THREE.Vector3(rx+cX*60, 50, rz+cZ*60), new THREE.Vector3(0,-1,0));
-                const hit = ray.intersectObject(ground);
-                if(hit.length > 0 && hit[0].point.y > -1.5) {
-                    const prop = loadedProps.length > 0 ? loadedProps[Math.floor(Math.random()*loadedProps.length)].clone() : new THREE.Mesh(new THREE.BoxGeometry(1,2,1), new THREE.MeshStandardMaterial({color:0x00ff00}));
-                    prop.position.set(rx+cX*60, hit[0].point.y, rz+cZ*60);
-                    scene.add(prop);
-                }
+            void main() {
+                vec3 color = uColorSand;
+                
+                // Height based blending (Tri-planar blending logic simplified for height)
+                // Thresholds
+                float hSand = -5.0;
+                float hGrass = 5.0;
+                float hStone = 80.0;
+                float hSnow = 140.0;
+                
+                float blendRange = 15.0; // Soft blending
+
+                float wGrass = smoothstep(hSand, hSand + blendRange, vHeight);
+                float wStone = smoothstep(hGrass, hGrass + blendRange, vHeight);
+                float wSnow = smoothstep(hStone, hStone + blendRange, vHeight);
+                
+                // Slope calculation for rocks on steep hills
+                vec3 up = vec3(0.0, 1.0, 0.0);
+                float slope = 1.0 - dot(vNormal, up);
+                float slopeStone = smoothstep(0.4, 0.7, slope);
+
+                // Color Mixing
+                color = mix(color, uColorGrass, wGrass);
+                color = mix(color, uColorStone, wStone);
+                color = mix(color, uColorSnow, wSnow);
+                
+                // Apply steepness rock logic (Rock usually overrides grass/snow on cliffs)
+                color = mix(color, uColorStone, slopeStone);
+
+                // Basic directional lighting (simulated in shader for custom control or use Three.js lights)
+                // For this implementation we rely on Three'js StandardMaterial logic being bypassed, 
+                // so we need to multiply by light. 
+                // However, to keep "Receive Shadow" working with custom shaders, 
+                // it is usually easier to use MeshStandardMaterial + onBeforeCompile.
+                // But for pure ShaderMaterial control asked in prompt, we output basic color.
+                // To make it look "Maximum Graphics", we will assume the environment lighting adds depth
+                // or we fake some ambient occlusion based on slope.
+
+                gl_FragColor = vec4(color, 1.0);
             }
+        `;
 
-            if(Math.random() > 0.7) spawnEnemy(cX*60 + (Math.random()-0.5)*30, cZ*60 + (Math.random()-0.5)*30);
+        // --- MATERIALS ---
 
-            group.position.set(cX*60, 0, cZ*60);
-            scene.add(group);
-            chunks.set(`${cX},${cZ}`, group);
-        }
-
-        function spawnEnemy(x, z) {
-            const group = new THREE.Group();
-            let model, mixer, anims = {};
-            if(enemyData) {
-                model = SkeletonUtils.clone(enemyData.scene);
-                mixer = new THREE.AnimationMixer(model);
-                enemyData.animations.forEach(c => anims[c.name.toLowerCase()] = mixer.clipAction(c));
-                anims['idle']?.play();
-            } else {
-                model = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), new THREE.MeshStandardMaterial({color:0x000000}));
-            }
-            group.add(model);
-            group.position.set(x, 10, z);
-            group.userData = { hp: 100, maxHp: 100, mixer, anims, lastAtk: 0 };
-            const hpF = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 0.1), new THREE.MeshBasicMaterial({color:0x00ff00}));
-            hpF.position.y = 3; group.userData.hpFill = hpF; group.add(hpF);
-            scene.add(group);
-            enemies.push(group);
-        }
-
-        let pMixer, pAnims = {}, isAttacking = false;
-        const playerPivot = new THREE.Group();
-        scene.add(playerPivot);
-
-        loader.load('./chars/testchard.glb', (gltf) => {
-            const m = gltf.scene; m.rotation.y = Math.PI; m.position.y = -CONFIG.PLAYER_HEIGHT;
-            playerPivot.add(m);
-            pMixer = new THREE.AnimationMixer(m);
-            gltf.animations.forEach(a => pAnims[a.name.toLowerCase()] = pMixer.clipAction(a));
-            pAnims['idle']?.play();
+        const waterMaterial = new THREE.ShaderMaterial({
+            vertexShader: waterVertexShader,
+            fragmentShader: waterFragmentShader,
+            uniforms: {
+                uTime: { value: 0 },
+                uWaveSize: { value: 3.5 },
+                uSpeed: { value: 1.0 },
+                uColorDeep: { value: CONFIG.colors.waterDeep },
+                uColorShallow: { value: CONFIG.colors.waterShallow },
+                uColorFoam: { value: CONFIG.colors.foam },
+                uFoamThreshold: { value: 1.8 }
+            },
+            transparent: true,
+            side: THREE.DoubleSide
         });
 
-        const keys = {}, vel = new THREE.Vector3();
-        window.onkeydown = (e) => keys[e.code] = true;
-        window.onkeyup = (e) => keys[e.code] = false;
+        // Use StandardMaterial for Ground to get Real Shadows, but modify with onBeforeCompile for Biomes
+        const groundMaterial = new THREE.MeshStandardMaterial({ 
+            roughness: 0.8, 
+            metalness: 0.1,
+            flatShading: false,
+            vertexColors: false
+        });
+        
+        groundMaterial.onBeforeCompile = (shader) => {
+            shader.uniforms.uColorSand = { value: CONFIG.colors.sand };
+            shader.uniforms.uColorGrass = { value: CONFIG.colors.grass };
+            shader.uniforms.uColorStone = { value: CONFIG.colors.stone };
+            shader.uniforms.uColorSnow = { value: CONFIG.colors.snow };
 
-        window.onmousedown = (e) => {
-            if(controls.isLocked && !isAttacking && e.button === 0) {
-                isAttacking = true;
-                if(pAnims['kick']) {
-                    pAnims['kick'].reset().setLoop(THREE.LoopOnce).play();
-                    setTimeout(() => checkHit(), 300);
-                    pMixer.addEventListener('finished', () => isAttacking = false, {once:true});
-                } else { setTimeout(() => { checkHit(); isAttacking=false; }, 500); }
-            }
+            shader.vertexShader = shader.vertexShader.replace(
+                '#include <common>',
+                `#include <common>
+                varying float vHeight;
+                varying float vSlope;
+                `
+            );
+            shader.vertexShader = shader.vertexShader.replace(
+                '#include <fog_vertex>',
+                `#include <fog_vertex>
+                vHeight = position.y;
+                // Simple slope approx in vertex shader
+                vec3 up = vec3(0.0, 1.0, 0.0);
+                vSlope = 1.0 - dot(normal, up);
+                `
+            );
+
+            shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <common>',
+                `#include <common>
+                uniform vec3 uColorSand;
+                uniform vec3 uColorGrass;
+                uniform vec3 uColorStone;
+                uniform vec3 uColorSnow;
+                varying float vHeight;
+                varying float vSlope;
+                `
+            );
+            shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <map_fragment>',
+                `
+                // Procedural Biome Logic injected into Standard Material
+                vec3 gColor = uColorSand;
+                
+                float wGrass = smoothstep(-5.0, 5.0, vHeight);
+                float wStone = smoothstep(30.0, 60.0, vHeight);
+                float wSnow = smoothstep(110.0, 140.0, vHeight);
+                float slopeMix = smoothstep(0.35, 0.6, vSlope);
+
+                gColor = mix(gColor, uColorGrass, wGrass);
+                gColor = mix(gColor, uColorStone, wStone);
+                gColor = mix(gColor, uColorSnow, wSnow);
+                gColor = mix(gColor, uColorStone, slopeMix); // Cliffs are stone
+
+                diffuseColor *= vec4(gColor, 1.0);
+                `
+            );
         };
 
-        function checkHit() {
-            enemies.forEach((en, i) => {
-                if(en.position.distanceTo(playerPivot.position) < 4) {
-                    en.userData.hp -= PLAYER.baseDmg;
-                    en.userData.hpFill.scale.x = Math.max(0, en.userData.hp/en.userData.maxHp);
-                    if(en.userData.hp <= 0) { scene.remove(en); enemies.splice(i,1); PLAYER.xp += 50; updateUI(); }
-                }
-            });
-        }
+        // --- WORLD GENERATION (NOISE & CHUNKS) ---
 
-        function updateUI() {
-            document.getElementById('lvl-txt').innerText = PLAYER.level;
-            document.getElementById('hp-bar').style.width = (PLAYER.hp/PLAYER.maxHp)*100 + "%";
-            document.getElementById('xp-bar').style.width = (PLAYER.xp/PLAYER.nextLvl)*100 + "%";
-            document.getElementById('stats').innerText = `DMG: ${PLAYER.baseDmg} | XP: ${PLAYER.xp}/${PLAYER.nextLvl}`;
-        }
+        // Configurable Noise Settings
+        const NOISE_SETTINGS = {
+            scale: 0.003,
+            octaves: 6,
+            persistence: 0.5,
+            lacunarity: 2.0,
+            exponent: 1.2, // To flatten valleys and steepen peaks
+            heightMultiplier: 180
+        };
 
-        const clock = new THREE.Clock();
-        function animate() {
-            requestAnimationFrame(animate);
-            const dt = Math.min(clock.getDelta(), 0.1);
-            if(waterMaterial.userData.shader) waterMaterial.userData.shader.uniforms.time.value = performance.now()*0.0015;
+        function getTerrainHeight(x, z) {
+            let amplitude = 1;
+            let frequency = NOISE_SETTINGS.scale;
+            let noiseHeight = 0;
 
-            if(controls.isLocked) {
-                const camF = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion); camF.y=0; camF.normalize();
-                const camR = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); camR.y=0; camR.normalize();
-                const move = new THREE.Vector3();
-
-                if(!isAttacking) {
-                    if(keys['KeyW']) move.add(camF); if(keys['KeyS']) move.sub(camF);
-                    if(keys['KeyD']) move.add(camR); if(keys['KeyA']) move.sub(camR);
-                    if(move.length() > 0) {
-                        move.normalize(); vel.x = move.x * PLAYER.speed; vel.z = move.z * PLAYER.speed;
-                        playerPivot.rotation.y = Math.atan2(move.x, move.z) + Math.PI;
-                        pAnims['run']?.play();
-                    } else { vel.x *= 0.1; vel.z *= 0.1; pAnims['run']?.stop(); }
-                } else { vel.x = 0; vel.z = 0; }
-
-                vel.y -= 50 * dt;
-                playerPivot.position.addScaledVector(vel, dt);
-                const gh = getHeight(playerPivot.position.x, playerPivot.position.z);
-                if(playerPivot.position.y < gh + CONFIG.PLAYER_HEIGHT) { playerPivot.position.y = gh + CONFIG.PLAYER_HEIGHT; vel.y = 0; }
-                camera.position.copy(playerPivot.position).add(new THREE.Vector3(0, 5, 10).applyQuaternion(camera.quaternion));
+            for (let i = 0; i < NOISE_SETTINGS.octaves; i++) {
+                let n = noise2D.noise(x * frequency, z * frequency);
+                noiseHeight += n * amplitude;
+                amplitude *= NOISE_SETTINGS.persistence;
+                frequency *= NOISE_SETTINGS.lacunarity;
             }
 
-            enemies.forEach(en => {
-                if(en.userData.mixer) en.userData.mixer.update(dt);
-                const d = en.position.distanceTo(playerPivot.position);
-                if(d < 15 && d > 2) {
-                    en.position.addScaledVector(new THREE.Vector3().subVectors(playerPivot.position, en.position).normalize(), 5*dt);
-                    en.lookAt(playerPivot.position.x, en.position.y, playerPivot.position.z);
-                    en.userData.anims['run']?.play();
-                } else if(d <= 2 && performance.now() - en.userData.lastAtk > 1500) {
-                    en.userData.anims['attack']?.reset().play();
-                    PLAYER.hp -= 10; en.userData.lastAtk = performance.now(); updateUI();
+            // Normalize slightly and apply exponent for terrain shape
+            noiseHeight = Math.pow(Math.abs(noiseHeight), NOISE_SETTINGS.exponent) * Math.sign(noiseHeight);
+            return noiseHeight * NOISE_SETTINGS.heightMultiplier;
+        }
+
+        class ChunkManager {
+            constructor() {
+                this.chunks = {};
+                this.loadedModels = { tree: null, rock: null };
+                this.loadModels();
+                this.raycaster = new THREE.Raycaster();
+            }
+
+            loadModels() {
+                const loader = new GLTFLoader();
+                const loadModel = (path, type, fallbackColor) => {
+                    loader.load(path, (gltf) => {
+                        gltf.scene.traverse(c => { if(c.isMesh) { c.castShadow = true; c.receiveShadow = true; }});
+                        this.loadedModels[type] = gltf.scene;
+                        console.log(`Loaded ${type}`);
+                    }, undefined, (err) => {
+                        // Fallback Mesh
+                        const geo = new THREE.BoxGeometry(2, type === 'tree' ? 8 : 2, 2);
+                        const mat = new THREE.MeshStandardMaterial({ color: fallbackColor });
+                        const mesh = new THREE.Mesh(geo, mat);
+                        mesh.castShadow = true; mesh.receiveShadow = true;
+                        this.loadedModels[type] = mesh;
+                    });
+                };
+
+                loadModel('/mallit/tree.glb', 'tree', 0x2d5a27);
+                loadModel('/mallit/rock.glb', 'rock', 0x888888);
+            }
+
+            update(playerPos) {
+                const pX = Math.floor(playerPos.x / CONFIG.chunkSize);
+                const pZ = Math.floor(playerPos.z / CONFIG.chunkSize);
+
+                const visibleKeys = new Set();
+
+                for (let x = -CONFIG.viewDistance; x <= CONFIG.viewDistance; x++) {
+                    for (let z = -CONFIG.viewDistance; z <= CONFIG.viewDistance; z++) {
+                        const cx = pX + x;
+                        const cz = pZ + z;
+                        const key = `${cx},${cz}`;
+                        visibleKeys.add(key);
+
+                        if (!this.chunks[key]) {
+                            this.createChunk(cx, cz);
+                        }
+                    }
                 }
-                en.position.y = getHeight(en.position.x, en.position.z) + 1;
-                en.userData.hpFill.lookAt(camera.position);
-            });
 
-            const pCX = Math.round(playerPivot.position.x/60), pCZ = Math.round(playerPivot.position.z/60);
-            for(let x=-1; x<=1; x++) for(let z=-1; z<=1; z++) if(!chunks.has(`${pCX+x},${pCZ+z}`)) createChunk(pCX+x, pCZ+z);
+                // Cleanup old chunks
+                for (const key in this.chunks) {
+                    if (!visibleKeys.has(key)) {
+                        scene.remove(this.chunks[key].mesh);
+                        scene.remove(this.chunks[key].water);
+                        scene.remove(this.chunks[key].objects);
+                        this.chunks[key].geometry.dispose();
+                        delete this.chunks[key];
+                    }
+                }
+            }
 
-            if(pMixer) pMixer.update(dt);
+            createChunk(cx, cz) {
+                const size = CONFIG.chunkSize;
+                const segments = CONFIG.resolution;
+                const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+                geometry.rotateX(-Math.PI / 2);
+
+                const positions = geometry.attributes.position.array;
+                
+                // Displace Ground
+                for (let i = 0; i < positions.length; i += 3) {
+                    const vx = positions[i] + cx * size;
+                    const vz = positions[i + 2] + cz * size;
+                    positions[i + 1] = getTerrainHeight(vx, vz);
+                }
+                
+                geometry.computeVertexNormals();
+
+                // Ground Mesh
+                const mesh = new THREE.Mesh(geometry, groundMaterial);
+                mesh.position.set(cx * size, 0, cz * size);
+                mesh.receiveShadow = true;
+                mesh.castShadow = true;
+                scene.add(mesh);
+
+                // Water Mesh
+                const waterGeo = new THREE.PlaneGeometry(size, size, segments / 2, segments / 2);
+                waterGeo.rotateX(-Math.PI / 2);
+                const water = new THREE.Mesh(waterGeo, waterMaterial);
+                water.position.set(cx * size, CONFIG.waterLevel, cz * size);
+                scene.add(water);
+
+                // Object Placement (Raycaster/Height Logic)
+                const objectsGroup = new THREE.Group();
+                objectsGroup.position.set(cx * size, 0, cz * size);
+                this.placeObjects(objectsGroup, cx, cz);
+                scene.add(objectsGroup);
+
+                this.chunks[`${cx},${cz}`] = { mesh, water, geometry, objects: objectsGroup };
+            }
+
+            placeObjects(group, cx, cz) {
+                if (!this.loadedModels.tree || !this.loadedModels.rock) return;
+
+                const count = 10; // Objects per chunk
+                for (let i = 0; i < count; i++) {
+                    const lx = (Math.random() - 0.5) * CONFIG.chunkSize;
+                    const lz = (Math.random() - 0.5) * CONFIG.chunkSize;
+                    const wx = lx + cx * CONFIG.chunkSize;
+                    const wz = lz + cz * CONFIG.chunkSize;
+
+                    const h = getTerrainHeight(wx, wz);
+
+                    // Logic: Trees on grass, Rocks anywhere but mostly steep or high
+                    // Simple logic: Trees between height 0 and 60. Rocks anywhere.
+                    
+                    let model = null;
+                    let scale = 1;
+
+                    if (h > 0 && h < 50 && Math.random() > 0.3) {
+                        model = this.loadedModels.tree.clone();
+                        scale = 3 + Math.random() * 3;
+                    } else if (h > -10 && Math.random() > 0.5) {
+                        model = this.loadedModels.rock.clone();
+                        scale = 2 + Math.random() * 5;
+                    }
+
+                    if (model && h > CONFIG.waterLevel) {
+                        model.position.set(lx, h, lz);
+                        model.scale.set(scale, scale, scale);
+                        model.rotation.y = Math.random() * Math.PI * 2;
+                        group.add(model);
+                    }
+                }
+            }
+        }
+
+        // --- PLANE & PHYSICS ---
+
+        class Plane {
+            constructor() {
+                // Geometry
+                const geometry = new THREE.ConeGeometry(1, 4, 32);
+                geometry.rotateX(Math.PI / 2);
+                const material = new THREE.MeshStandardMaterial({ color: 0xff0000, metalness: 0.8, roughness: 0.2 });
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.castShadow = true;
+                scene.add(this.mesh);
+
+                // Physics state
+                this.position = new THREE.Vector3(0, 150, 0);
+                this.velocity = new THREE.Vector3(0, 0, 50); // Initial speed
+                this.quaternion = new THREE.Quaternion();
+                this.speed = 50;
+                this.throttle = 0.5; // 0 to 1
+                
+                // Camera config
+                this.camDist = 30;
+                this.camHeight = 10;
+                
+                // Input State
+                this.input = { w: false, a: false, s: false, d: false, shift: false, ctrl: false };
+
+                // Apply initial rotation
+                this.mesh.position.copy(this.position);
+                
+                // Helper vectors
+                this.forward = new THREE.Vector3();
+                this.up = new THREE.Vector3(0,1,0);
+                this.dummy = new THREE.Object3D();
+            }
+
+            update(dt) {
+                // 1. Handle Throttle
+                if (this.input.shift) this.throttle = Math.min(this.throttle + dt * 0.5, 1.0);
+                if (this.input.ctrl) this.throttle = Math.max(this.throttle - dt * 0.5, 0.0);
+
+                // 2. Physics Model (Simplified Aerodynamics)
+                // Thrust
+                const maxSpeed = 150;
+                const minSpeed = 30;
+                const targetSpeed = minSpeed + this.throttle * (maxSpeed - minSpeed);
+                
+                // Drag / Acceleration
+                this.speed += (targetSpeed - this.speed) * dt * 0.5;
+
+                // Rotations based on WASD
+                const pitchSpeed = 1.0;
+                const rollSpeed = 1.5;
+                const yawSpeed = 0.5;
+
+                // Current local rotation axes
+                const localX = new THREE.Vector3(1, 0, 0).applyQuaternion(this.quaternion);
+                const localY = new THREE.Vector3(0, 1, 0).applyQuaternion(this.quaternion);
+                const localZ = new THREE.Vector3(0, 0, 1).applyQuaternion(this.quaternion);
+
+                // Inputs
+                if (this.input.w) this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, pitchSpeed * dt));
+                if (this.input.s) this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, -pitchSpeed * dt));
+                if (this.input.a) {
+                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localZ, rollSpeed * dt)); // Roll
+                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localY, yawSpeed * dt));  // Mild Yaw
+                }
+                if (this.input.d) {
+                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localZ, -rollSpeed * dt));
+                    this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localY, -yawSpeed * dt));
+                }
+
+                // Gravity effect (pull nose down if speed is low)
+                // const gravityTilt = (1.0 - this.throttle) * dt * 0.2;
+                // this.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(localX, gravityTilt));
+
+                // Auto-leveling (very subtle)
+                // ... skipped for "Real Physics" feel request, makes it harder to fly but more realistic
+
+                this.mesh.quaternion.copy(this.quaternion);
+
+                // Calculate Forward Vector
+                this.forward.set(0, 0, -1).applyQuaternion(this.quaternion).normalize();
+
+                // Move
+                this.velocity.copy(this.forward).multiplyScalar(this.speed);
+                this.position.addScaledVector(this.velocity, dt);
+
+                // Collision with ground (basic)
+                const groundH = getTerrainHeight(this.position.x, this.position.z);
+                if (this.position.y < groundH + 2) {
+                    this.position.y = groundH + 2;
+                    // Crash logic could go here
+                }
+
+                this.mesh.position.copy(this.position);
+
+                // Camera Follow
+                this.updateCamera(dt);
+            }
+
+            updateCamera(dt) {
+                // Ideal position behind plane
+                const offset = new THREE.Vector3(0, this.camHeight, this.camDist);
+                offset.applyQuaternion(this.quaternion);
+                const targetPos = this.position.clone().add(offset);
+                const targetLook = this.position.clone().add(this.forward.clone().multiplyScalar(20));
+
+                // Lerp for smooth follow
+                camera.position.lerp(targetPos, dt * 5);
+                camera.lookAt(targetLook);
+            }
+        }
+
+        // --- SKY & ENVIRONMENT SYSTEM ---
+
+        class SkySystem {
+            constructor() {
+                // Sun Light
+                this.sunLight = new THREE.DirectionalLight(0xffffff, 2.0);
+                this.sunLight.castShadow = true;
+                this.sunLight.shadow.mapSize.width = 2048;
+                this.sunLight.shadow.mapSize.height = 2048;
+                this.sunLight.shadow.camera.near = 0.5;
+                this.sunLight.shadow.camera.far = 500;
+                this.sunLight.shadow.camera.left = -200;
+                this.sunLight.shadow.camera.right = 200;
+                this.sunLight.shadow.camera.top = 200;
+                this.sunLight.shadow.camera.bottom = -200;
+                scene.add(this.sunLight);
+
+                // Ambient
+                this.ambientLight = new THREE.HemisphereLight(0x87CEEB, 0x333333, 0.5);
+                scene.add(this.ambientLight);
+
+                // Starfield
+                const starGeo = new THREE.BufferGeometry();
+                const starCount = 2000;
+                const starPos = new Float32Array(starCount * 3);
+                for(let i=0; i<starCount*3; i++) starPos[i] = (Math.random()-0.5)*4000;
+                starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+                this.stars = new THREE.Points(starGeo, new THREE.PointsMaterial({color: 0xffffff, size: 2, transparent: true, opacity: 0}));
+                scene.add(this.stars);
+
+                // Cycle
+                this.time = 0;
+                this.dayDuration = 60; // seconds for full day
+                this.speed = 0.5; // Multiplier
+            }
+
+            update(dt, playerPos) {
+                this.time += dt * this.speed;
+                const cycle = (this.time % this.dayDuration) / this.dayDuration; // 0 to 1
+                const angle = cycle * Math.PI * 2;
+
+                // Move Sun
+                const sunDist = 500;
+                this.sunLight.position.set(
+                    playerPos.x + Math.sin(angle) * sunDist,
+                    Math.sin(angle + Math.PI/2) * sunDist, // Rise/Set logic
+                    playerPos.z + Math.cos(angle) * sunDist
+                );
+
+                this.sunLight.target.position.copy(playerPos);
+                this.sunLight.target.updateMatrixWorld();
+
+                // Colors based on cycle (Day/Night)
+                const sunHeight = Math.sin(angle + Math.PI/2);
+                
+                let skyColor, fogColor, lightIntensity;
+
+                if (sunHeight > 0.1) {
+                    // Day
+                    skyColor = new THREE.Color(0x87CEEB);
+                    fogColor = new THREE.Color(0x87CEEB);
+                    lightIntensity = 2.0;
+                    this.stars.material.opacity = 0;
+                } else if (sunHeight < -0.1) {
+                    // Night
+                    skyColor = new THREE.Color(0x000011);
+                    fogColor = new THREE.Color(0x000511);
+                    lightIntensity = 0.0; // Moonlight handled by hemisphere
+                    this.stars.material.opacity = 1;
+                    this.stars.position.copy(playerPos); // Stars follow to seem infinite
+                } else {
+                    // Sunset / Sunrise
+                    skyColor = new THREE.Color(0xff9900);
+                    fogColor = new THREE.Color(0xffaa33);
+                    lightIntensity = 1.0;
+                    this.stars.material.opacity = 0.5;
+                }
+
+                // Lerp colors for smoothness
+                scene.background = skyColor;
+                scene.fog.color.lerp(fogColor, dt);
+                this.sunLight.intensity = THREE.MathUtils.lerp(this.sunLight.intensity, lightIntensity, dt);
+            }
+        }
+
+        // --- MAIN INITIALIZATION ---
+
+        const chunkManager = new ChunkManager();
+        const plane = new Plane();
+        const skySystem = new SkySystem();
+        const clock = new THREE.Clock();
+
+        // Inputs
+        window.addEventListener('keydown', (e) => {
+            if(e.key === 'w') plane.input.w = true;
+            if(e.key === 's') plane.input.s = true;
+            if(e.key === 'a') plane.input.a = true;
+            if(e.key === 'd') plane.input.d = true;
+            if(e.key === 'Shift') plane.input.shift = true;
+            if(e.key === 'Control') plane.input.ctrl = true;
+            if(e.key === '+') plane.camDist = Math.max(10, plane.camDist - 2);
+            if(e.key === '-') plane.camDist = Math.min(100, plane.camDist + 2);
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if(e.key === 'w') plane.input.w = false;
+            if(e.key === 's') plane.input.s = false;
+            if(e.key === 'a') plane.input.a = false;
+            if(e.key === 'd') plane.input.d = false;
+            if(e.key === 'Shift') plane.input.shift = false;
+            if(e.key === 'Control') plane.input.ctrl = false;
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // GUI Setup
+        const gui = new GUI({ title: 'World Settings' });
+        
+        const folderWater = gui.addFolder('Water Shader');
+        folderWater.add(waterMaterial.uniforms.uWaveSize, 'value', 0, 10).name('Wave Size');
+        folderWater.add(waterMaterial.uniforms.uSpeed, 'value', 0, 5).name('Wave Speed');
+        folderWater.add(waterMaterial.uniforms.uFoamThreshold, 'value', 0, 5).name('Foam Thresh');
+        folderWater.addColor({c: CONFIG.colors.waterDeep.getHex()}, 'c').name('Deep Color').onChange(v => waterMaterial.uniforms.uColorDeep.value.set(v));
+        folderWater.addColor({c: CONFIG.colors.waterShallow.getHex()}, 'c').name('Shallow Color').onChange(v => waterMaterial.uniforms.uColorShallow.value.set(v));
+
+        const folderGround = gui.addFolder('Ground Generation');
+        folderGround.add(NOISE_SETTINGS, 'scale', 0.001, 0.01).name('Noise Scale').onChange(()=>alert("Refresh to apply terrain scale changes"));
+        folderGround.addColor({c: CONFIG.colors.sand.getHex()}, 'c').name('Sand').onChange(v => { CONFIG.colors.sand.set(v); chunkManager.chunks = {}; }); // Trigger rebuild roughly
+        
+        const folderSky = gui.addFolder('Sky & Time');
+        folderSky.add(skySystem, 'speed', 0, 5).name('Day Cycle Speed');
+
+        // Animation Loop
+        document.getElementById('loading').style.display = 'none';
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const dt = clock.getDelta();
+            
+            // Updates
+            plane.update(dt);
+            skySystem.update(dt, plane.position);
+            chunkManager.update(plane.position);
+            
+            // Shader Updates
+            waterMaterial.uniforms.uTime.value += dt;
+
             renderer.render(scene, camera);
         }
-        updateUI();
+
         animate();
+
     </script>
 </body>
 </html>
